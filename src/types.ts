@@ -122,4 +122,5 @@ export type DbInfo = {
   path: string;
   tables: TableInfo[];
   backup_path?: string | null;
+  project_path?: string | null;
 };

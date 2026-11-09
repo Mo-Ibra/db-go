@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use db_go_core::{
-    CellValue, ColumnInfo, CountResult, Database, Direction, Page, QueryResult, TableInfo,
+    CellValue, ColumnInfo, CountResult, Database, Direction, Page, QueryResult, SchemaGraph,
+    TableDesign, TableInfo,
 };
 use serde::Serialize;
 
@@ -29,13 +30,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create a new empty SQLite database.
+    /// Create a new database project (or a single-file database with --single-file).
     Init {
         db: PathBuf,
-        /// Replace an existing database, keeping a timestamped backup.
+        /// Replace an existing database/project, keeping a timestamped backup.
         #[arg(long)]
         force: bool,
+        /// Create a bare .db file instead of a project folder.
+        #[arg(long)]
+        single_file: bool,
     },
+
+    /// Show the full schema graph: tables, columns, and relationships.
+    Graph { db: PathBuf },
+
+    /// Create a table from a JSON design file.
+    CreateTable {
+        db: PathBuf,
+        #[arg(long)]
+        file: PathBuf,
+    },
+
+    /// Back up the database.
+    Backup { db: PathBuf },
 
     /// List tables in a database.
     Tables { db: PathBuf },
@@ -98,12 +115,45 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
-        Command::Init { db, force } => {
-            let (_database, backup) = Database::create(&db, force).map_err(err)?;
-            if let Some(backup) = backup {
-                eprintln!("dbgo: existing database backed up to {}", backup.display());
+        Command::Init {
+            db,
+            force,
+            single_file,
+        } => {
+            if single_file {
+                let (_database, backup) = Database::create(&db, force).map_err(err)?;
+                if let Some(backup) = backup {
+                    eprintln!("dbgo: existing database backed up to {}", backup.display());
+                }
+                println!("created database {}", db.display());
+            } else {
+                let (database, backup) = Database::create_project(&db, force).map_err(err)?;
+                if let Some(backup) = backup {
+                    eprintln!("dbgo: existing database backed up to {}", backup.display());
+                }
+                println!("created project {}", db.display());
+                println!("database: {}", database.path().display());
+                println!("agent guide: {}", db.join("AGENTS.md").display());
             }
-            println!("created {}", db.display());
+            Ok(())
+        }
+        Command::Graph { db } => {
+            let database = open(&db)?;
+            let graph = database.schema_graph().map_err(err)?;
+            output_graph(&graph, cli.json, cli.jsonl)
+        }
+        Command::CreateTable { db, file } => {
+            let content = std::fs::read_to_string(&file).map_err(err)?;
+            let design: TableDesign = serde_json::from_str(&content).map_err(err)?;
+            let database = open(&db)?;
+            let table = database.create_table(&design).map_err(err)?;
+            println!("created table {}", table.name);
+            Ok(())
+        }
+        Command::Backup { db } => {
+            let database = open(&db)?;
+            let backup = database.backup().map_err(err)?;
+            println!("{}", backup.display());
             Ok(())
         }
         Command::Tables { db } => {
@@ -144,9 +194,9 @@ fn run(cli: Cli) -> Result<(), String> {
 
 fn open(path: &Path) -> Result<Database, String> {
     if !path.exists() {
-        return Err(format!("database not found: {}", path.display()));
+        return Err(format!("database or project not found: {}", path.display()));
     }
-    Database::open(path).map_err(err)
+    Database::open_project(path).map_err(err)
 }
 
 fn output_tables(tables: &[TableInfo], json: bool, jsonl: bool) -> Result<(), String> {
@@ -188,6 +238,53 @@ fn output_columns(columns: &[ColumnInfo], json: bool, jsonl: bool) -> Result<(),
         ]);
     }
     print_table(table)
+}
+
+fn output_graph(graph: &SchemaGraph, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(graph);
+    }
+    if jsonl {
+        return write_jsonl(&graph.tables);
+    }
+
+    let mut output = String::new();
+    for table in &graph.tables {
+        output.push_str(&format!("{}\n", table.name));
+        for column in &table.columns {
+            let marker = if column.primary_key {
+                " PK"
+            } else if column.foreign_key {
+                " FK"
+            } else {
+                ""
+            };
+            output.push_str(&format!(
+                "  {} {}{}{}\n",
+                column.name,
+                column.type_name,
+                marker,
+                if column.not_null { " NOT NULL" } else { "" }
+            ));
+        }
+        output.push('\n');
+    }
+
+    if !graph.relationships.is_empty() {
+        output.push_str("relationships:\n");
+        for relationship in &graph.relationships {
+            output.push_str(&format!(
+                "  {}.{} -> {}.{} (ON DELETE {})\n",
+                relationship.from_table,
+                relationship.from_column,
+                relationship.to_table,
+                relationship.to_column,
+                relationship.on_delete
+            ));
+        }
+    }
+
+    print_line(&output)
 }
 
 fn output_count(count: &CountResult, json: bool, jsonl: bool) -> Result<(), String> {

@@ -18,6 +18,8 @@ export const api = {
   openDatabase: (path: string) => invoke<DbInfo>("open_database", { path }),
   createDatabase: (path: string, overwrite: boolean) =>
     invoke<DbInfo>("create_database", { path, overwrite }),
+  createProject: (path: string, overwrite: boolean) =>
+    invoke<DbInfo>("create_project", { path, overwrite }),
   createTable: (design: TableDesign) => invoke<TableInfo>("create_table", { design }),
   closeDatabase: () => invoke<void>("close_database"),
   listTables: () => invoke<TableInfo[]>("list_tables"),

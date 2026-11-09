@@ -8,6 +8,7 @@ description = "SQLite engine and schema introspection for DBGo"
 [dependencies]
 rusqlite.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 base64.workspace = true
 

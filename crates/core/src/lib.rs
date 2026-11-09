@@ -26,8 +26,14 @@ pub enum DbError {
     MissingFilterValue(FilterOp),
     #[error("database already exists: {0}")]
     DatabaseExists(String),
+    #[error("project already exists: {0}")]
+    ProjectExists(String),
+    #[error("not a DBGo project: {0}")]
+    NotAProject(String),
     #[error("invalid table design: {0}")]
     InvalidDesign(String),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -148,6 +154,15 @@ pub struct DbInfo {
     pub path: String,
     pub tables: Vec<TableInfo>,
     pub backup_path: Option<String>,
+    pub project_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    pub name: String,
+    pub database: String,
+    pub version: u32,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -192,11 +207,13 @@ pub enum Direction {
 pub struct Database {
     path: PathBuf,
     conn: Connection,
+    project_dir: Option<PathBuf>,
 }
 
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+        let project_dir = detect_project_dir(&path);
         let conn = Connection::open(&path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -207,7 +224,120 @@ impl Database {
              PRAGMA busy_timeout=5000;
              PRAGMA foreign_keys=ON;",
         )?;
-        Ok(Self { path, conn })
+        Ok(Self {
+            path,
+            conn,
+            project_dir,
+        })
+    }
+
+    pub fn open_project(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Err(DbError::NotAProject(format!(
+                "path not found: {}",
+                path.display()
+            )));
+        }
+        if path.is_dir() {
+            let config = read_project_config(path)?;
+            let database_path = path.join(&config.database);
+            if !database_path.exists() {
+                return Err(DbError::NotAProject(format!(
+                    "database file missing: {}",
+                    database_path.display()
+                )));
+            }
+            let mut database = Self::open(&database_path)?;
+            database.project_dir = Some(path.to_path_buf());
+            Ok(database)
+        } else {
+            Self::open(path)
+        }
+    }
+
+    pub fn project_dir(&self) -> Option<&Path> {
+        self.project_dir.as_deref()
+    }
+
+    pub fn backup(&self) -> Result<PathBuf> {
+        if let Some(project_dir) = &self.project_dir {
+            let backups = project_dir.join("backups");
+            std::fs::create_dir_all(&backups)?;
+            let file_name = self
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("db.sqlite");
+            let backup = backups.join(format!("{file_name}.bak-{}", now_millis()));
+            backup_database_to(&self.path, &backup)?;
+            Ok(backup)
+        } else {
+            backup_database(&self.path)
+        }
+    }
+
+    fn write_schema_md(&self) -> Result<()> {
+        let Some(project_dir) = &self.project_dir else {
+            return Ok(());
+        };
+        let graph = self.schema_graph()?;
+        std::fs::write(project_dir.join("schema.md"), schema_markdown(&graph))?;
+        Ok(())
+    }
+
+    pub fn create_project(
+        path: impl AsRef<Path>,
+        overwrite: bool,
+    ) -> Result<(Self, Option<PathBuf>)> {
+        let project_dir = path.as_ref().to_path_buf();
+        if project_dir.exists() && !project_dir.is_dir() {
+            return Err(DbError::InvalidDesign(format!(
+                "project path must be a directory: {}",
+                project_dir.display()
+            )));
+        }
+
+        let config_path = project_dir.join("dbgo.json");
+        let database_path = project_dir.join("db.sqlite");
+        let exists = config_path.exists() || database_path.exists();
+        if exists && !overwrite {
+            return Err(DbError::ProjectExists(project_dir.display().to_string()));
+        }
+
+        std::fs::create_dir_all(&project_dir)?;
+        let backups_dir = project_dir.join("backups");
+        let migrations_dir = project_dir.join("migrations");
+        std::fs::create_dir_all(&backups_dir)?;
+        std::fs::create_dir_all(&migrations_dir)?;
+
+        let mut backup = None;
+        if database_path.exists() {
+            let backup_path = backups_dir.join(format!("db.sqlite.bak-{}", now_millis()));
+            backup_database_to(&database_path, &backup_path)?;
+            std::fs::remove_file(&database_path)?;
+            remove_sidecar(&database_path, "-wal");
+            remove_sidecar(&database_path, "-shm");
+            backup = Some(backup_path);
+        }
+
+        let mut database = Self::open(&database_path)?;
+        database.ensure_migrations_table()?;
+        database.project_dir = Some(project_dir.clone());
+
+        let config = ProjectConfig {
+            name: project_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("database")
+                .to_string(),
+            database: "db.sqlite".to_string(),
+            version: 1,
+            created_at: now_secs(),
+        };
+        write_project_files(&project_dir, &config)?;
+
+        Ok((database, backup))
     }
 
     pub fn create(path: impl AsRef<Path>, overwrite: bool) -> Result<(Self, Option<PathBuf>)> {
@@ -698,7 +828,19 @@ impl Database {
             "INSERT INTO _dbgo_migrations (name, sql) VALUES (?1, ?2)",
             rusqlite::params![format!("create_table:{table_name}"), migration_sql],
         )?;
+        let migration_id = transaction.last_insert_rowid();
         transaction.commit()?;
+
+        if let Some(project_dir) = &self.project_dir {
+            if let Err(error) =
+                write_migration_file(project_dir, migration_id, table_name, &migration_sql)
+            {
+                eprintln!("[dbgo] warning: could not write migration file: {error}");
+            }
+            if let Err(error) = self.write_schema_md() {
+                eprintln!("[dbgo] warning: could not update schema.md: {error}");
+            }
+        }
 
         Ok(TableInfo {
             name: table_name.to_string(),
@@ -941,14 +1083,205 @@ fn backup_database(path: &Path) -> Result<PathBuf> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("database");
-    let timestamp = SystemTime::now()
+    let backup = path.with_file_name(format!("{file_name}.bak-{}", now_millis()));
+    backup_database_to(path, &backup)?;
+    Ok(backup)
+}
+
+fn backup_database_to(source: &Path, destination: &Path) -> Result<()> {
+    let connection = Connection::open(source)?;
+    connection.execute("VACUUM INTO ?1", [destination.to_string_lossy().as_ref()])?;
+    Ok(())
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
-    let backup = path.with_file_name(format!("{file_name}.bak-{timestamp}"));
-    let connection = Connection::open(path)?;
-    connection.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
-    Ok(backup)
+        .as_millis()
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn detect_project_dir(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    let config_path = parent.join("dbgo.json");
+    let content = std::fs::read_to_string(config_path).ok()?;
+    let config: ProjectConfig = serde_json::from_str(&content).ok()?;
+    if parent.join(&config.database) == path {
+        Some(parent.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn read_project_config(project_dir: &Path) -> Result<ProjectConfig> {
+    let path = project_dir.join("dbgo.json");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| DbError::NotAProject(project_dir.display().to_string()))?;
+    serde_json::from_str(&content)
+        .map_err(|error| DbError::InvalidDesign(format!("invalid dbgo.json: {error}")))
+}
+
+fn write_project_files(project_dir: &Path, config: &ProjectConfig) -> Result<()> {
+    let config_json = serde_json::to_string_pretty(config)?;
+    std::fs::write(project_dir.join("dbgo.json"), config_json)?;
+    std::fs::write(project_dir.join("AGENTS.md"), agents_markdown(config))?;
+    std::fs::write(
+        project_dir.join("schema.md"),
+        "# Schema\n\nNo tables yet.\n",
+    )?;
+    Ok(())
+}
+
+fn agents_markdown(config: &ProjectConfig) -> String {
+    const TEMPLATE: &str = r#"# Working with {{NAME}}
+
+The database is `{{DATABASE}}` in this folder. Never edit the database file directly.
+
+## Discover the schema
+
+- `dbgo graph . --json` — full tables, columns, and relationships
+- `dbgo schema . companies --json` — columns for one table
+- `dbgo tables .` — table list
+- `schema.md` is a generated snapshot; the CLI is authoritative.
+
+## Read
+
+- `dbgo query . "select * from companies limit 20" --json`
+- `dbgo page . companies --limit 50`
+- `dbgo count . companies`
+
+## Create tables
+
+Write a JSON design file, for example `table.json`:
+
+```json
+{
+  "name": "companies",
+  "columns": [
+    {
+      "name": "id",
+      "type_name": "INTEGER",
+      "primary_key": true,
+      "not_null": true,
+      "unique": false,
+      "default_value": null,
+      "references": null
+    },
+    {
+      "name": "name",
+      "type_name": "TEXT",
+      "primary_key": false,
+      "not_null": true,
+      "unique": false,
+      "default_value": null,
+      "references": null
+    }
+  ],
+  "index_foreign_keys": true
+}
+```
+
+Then run:
+
+```bash
+dbgo create-table . --file table.json
+```
+
+## Backups
+
+- `dbgo backup .` writes a timestamped snapshot into `backups/`.
+- The database, migrations, and backups live in this folder.
+
+## Rules
+
+- Use `dbgo`; never write the SQLite file directly.
+- Run `dbgo graph . --json` before changing the schema.
+- Use `--json` or `--jsonl` for machine-readable output.
+- Run commands from this folder and use `.` as the database path.
+- Do not edit `migrations/` by hand unless applying them to D1.
+
+## Current limitations
+
+- Insert / update / delete are the next milestone.
+- MCP is not available yet; use the CLI.
+"#;
+
+    TEMPLATE
+        .replace("{{NAME}}", &config.name)
+        .replace("{{DATABASE}}", &config.database)
+}
+
+fn write_migration_file(
+    project_dir: &Path,
+    migration_id: i64,
+    table: &str,
+    sql: &str,
+) -> Result<()> {
+    let migrations = project_dir.join("migrations");
+    std::fs::create_dir_all(&migrations)?;
+    let path = migrations.join(format!("{:04}_create_{}.sql", migration_id, table));
+    std::fs::write(path, format!("{sql}\n"))?;
+    Ok(())
+}
+
+fn schema_markdown(graph: &SchemaGraph) -> String {
+    let mut output = String::from("# Schema\n\n");
+    if graph.tables.is_empty() {
+        output.push_str("No tables yet.\n");
+        return output;
+    }
+
+    for table in &graph.tables {
+        output.push_str(&format!("## {}\n\n", md_escape(&table.name)));
+        output.push_str("| Column | Type | Constraints |\n|---|---|---|\n");
+        for column in &table.columns {
+            let mut constraints = Vec::new();
+            if column.primary_key {
+                constraints.push("PK");
+            }
+            if column.foreign_key {
+                constraints.push("FK");
+            }
+            if column.not_null {
+                constraints.push("NOT NULL");
+            }
+            output.push_str(&format!(
+                "| {} | {} | {} |\n",
+                md_escape(&column.name),
+                md_escape(&column.type_name),
+                constraints.join(", ")
+            ));
+        }
+        output.push('\n');
+    }
+
+    if !graph.relationships.is_empty() {
+        output.push_str("## Relationships\n\n");
+        for relationship in &graph.relationships {
+            output.push_str(&format!(
+                "- `{}.{}` → `{}.{}` (ON DELETE {})\n",
+                md_escape(&relationship.from_table),
+                md_escape(&relationship.from_column),
+                md_escape(&relationship.to_table),
+                md_escape(&relationship.to_column),
+                relationship.on_delete
+            ));
+        }
+        output.push('\n');
+    }
+
+    output
+}
+
+fn md_escape(value: &str) -> String {
+    value.replace('|', "\\|")
 }
 
 fn remove_sidecar(path: &Path, suffix: &str) {
@@ -980,6 +1313,7 @@ mod tests {
         Database {
             path: PathBuf::from(":memory:"),
             conn,
+            project_dir: None,
         }
     }
 
@@ -1315,5 +1649,63 @@ mod tests {
         assert!(backup.is_some());
         assert!(backup.as_ref().unwrap().exists());
         assert!(fresh.tables().unwrap().is_empty());
+    }
+
+    #[test]
+    fn creates_project_with_agent_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("database");
+        let (db, backup) = Database::create_project(&project, false).unwrap();
+        assert!(backup.is_none());
+        assert!(project.join("dbgo.json").exists());
+        assert!(project.join("AGENTS.md").exists());
+        assert!(project.join("schema.md").exists());
+        assert!(project.join("backups").is_dir());
+        assert!(project.join("migrations").is_dir());
+        assert_eq!(db.project_dir().unwrap(), project.as_path());
+        assert!(db.tables().unwrap().is_empty());
+
+        let reopened = Database::open_project(&project).unwrap();
+        assert_eq!(reopened.project_dir().unwrap(), project.as_path());
+        assert!(reopened.tables().unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_table_updates_project_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("database");
+        let (db, _) = Database::create_project(&project, false).unwrap();
+        db.create_table(&TableDesign {
+            name: "companies".into(),
+            columns: vec![ColumnDesign {
+                primary_key: true,
+                not_null: true,
+                ..column("id", "INTEGER")
+            }],
+            index_foreign_keys: true,
+        })
+        .unwrap();
+
+        let schema = std::fs::read_to_string(project.join("schema.md")).unwrap();
+        assert!(schema.contains("## companies"));
+        assert!(schema.contains("| id | INTEGER | PK, NOT NULL |"));
+
+        let migrations: Vec<_> = std::fs::read_dir(project.join("migrations"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert_eq!(migrations.len(), 1);
+        let migration = std::fs::read_to_string(migrations[0].path()).unwrap();
+        assert!(migration.contains("CREATE TABLE \"companies\""));
+    }
+
+    #[test]
+    fn backup_writes_into_project_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("database");
+        let (db, _) = Database::create_project(&project, false).unwrap();
+        let backup = db.backup().unwrap();
+        assert!(backup.starts_with(project.join("backups")));
+        assert!(backup.exists());
     }
 }

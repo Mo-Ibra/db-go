@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { confirm, open, save } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { api } from "./lib/api";
 import type {
   ColumnInfo,
@@ -278,31 +278,28 @@ export default function App() {
 
   const createNewDatabase = useCallback(async () => {
     try {
-      const path = await save({
-        defaultPath: "dbgo.db",
-        filters: [
-          { name: "SQLite database", extensions: ["db", "sqlite", "sqlite3"] },
-        ],
+      const path = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose a folder for the database project",
       });
-      if (!path) return;
-      const base = path.split(/[\\/]/).pop() ?? path;
-      const targetPath = base.includes(".") ? path : `${path}.db`;
+      if (!path || Array.isArray(path)) return;
 
       setLoading(true);
       setError(null);
       try {
         let info: DbInfo;
         try {
-          info = await api.createDatabase(targetPath, false);
+          info = await api.createProject(path, false);
         } catch (cause) {
           const message = String(cause);
           if (!message.toLowerCase().includes("already exists")) throw cause;
           const replace = await confirm(
-            "That file already exists. Replace it? A timestamped backup will be kept.",
-            { title: "Replace database?", kind: "warning" },
+            "A database project already exists in that folder. Replace it? A timestamped backup will be kept.",
+            { title: "Replace project?", kind: "warning" },
           );
           if (!replace) return;
-          info = await api.createDatabase(targetPath, true);
+          info = await api.createProject(path, true);
         }
 
         applyDbInfo(info);

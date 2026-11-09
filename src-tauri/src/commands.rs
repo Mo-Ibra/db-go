@@ -31,13 +31,48 @@ pub async fn initial_database() -> Result<Option<String>, String> {
 pub async fn open_database(path: String, state: State<'_, AppState>) -> Result<DbInfo, String> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<DbInfo, String> {
-        let database = Database::open(&path).map_err(to_error)?;
+        let database = Database::open_project(&path).map_err(to_error)?;
+        let database_path = database.path().display().to_string();
         let tables = database.tables().map_err(to_error)?;
-        eprintln!("[dbgo] opened database: {path} ({} tables)", tables.len());
+        eprintln!(
+            "[dbgo] opened database: {database_path} ({} tables)",
+            tables.len()
+        );
         let info = DbInfo {
-            path: path.clone(),
+            path: database_path,
             tables,
             backup_path: None,
+            project_path: database.project_dir().map(|p| p.display().to_string()),
+        };
+        *db.lock().map_err(|_| lock_error())? = Some(database);
+        Ok(info)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn create_project(
+    path: String,
+    overwrite: bool,
+    state: State<'_, AppState>,
+) -> Result<DbInfo, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<DbInfo, String> {
+        let (database, backup) = Database::create_project(&path, overwrite).map_err(to_error)?;
+        let tables = database.tables().map_err(to_error)?;
+        let database_path = database.path().display().to_string();
+        let project_path = database.project_dir().map(|p| p.display().to_string());
+        let backup_path = backup.map(|p| p.display().to_string());
+        eprintln!(
+            "[dbgo] created project: {path} (database: {database_path}, backup: {})",
+            backup_path.as_deref().unwrap_or("none")
+        );
+        let info = DbInfo {
+            path: database_path,
+            tables,
+            backup_path,
+            project_path,
         };
         *db.lock().map_err(|_| lock_error())? = Some(database);
         Ok(info)
@@ -60,6 +95,7 @@ pub async fn create_database(
             path: path.clone(),
             tables,
             backup_path: backup.map(|path| path.display().to_string()),
+            project_path: database.project_dir().map(|p| p.display().to_string()),
         };
         eprintln!(
             "[dbgo] created database: {path} (backup: {})",

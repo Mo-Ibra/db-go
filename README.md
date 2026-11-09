@@ -15,10 +15,11 @@ What's here so far:
 
 - Tauri 2 native desktop window (no browser app, no server)
 - Rust core with SQLite (WAL, memory-mapped I/O)
-- Create a new SQLite database from scratch
+- Create a database project: `db.sqlite`, `AGENTS.md`, `schema.md`, `migrations/`, `backups/`
 - Open an existing SQLite file with the native file picker
 - Visual table designer: types, PK/NN/unique, defaults, foreign keys, FK indexes
 - Live DDL preview; every schema change is recorded in hidden `_dbgo_migrations`
+- Every `create-table` also writes a migration file and refreshes `schema.md`
 - List tables in the sidebar
 - Browse rows with a virtualized grid
 - Keyset pagination (`rowid`) — fast on large tables
@@ -71,29 +72,58 @@ That puts `dbgo` in `~/.cargo/bin`, which is already on `PATH` for Rust users.
 Then, from anywhere:
 
 ```bash
-dbgo init ./myapp.db
+dbgo init ./database              # project folder
+dbgo init ./app.db --single-file  # bare SQLite file
+
 dbgo tables  ./samples/companies.db
 dbgo schema  ./samples/companies.db companies
 dbgo count   ./samples/companies.db companies
 dbgo page    ./samples/companies.db companies --limit 50 --cursor 201
 dbgo query   ./samples/companies.db "select id, name, city from companies limit 20"
 
+# project commands (run inside the project folder)
+cd database
+dbgo graph . --json
+dbgo create-table . --file table.json
+dbgo backup .
+
 # machine-readable
 dbgo --json  tables ./samples/companies.db
 dbgo --jsonl query  ./samples/companies.db "select * from companies limit 100"
 ```
 
-`dbgo init` creates a new empty database. Add `--force` to replace an existing
-file; a timestamped backup is kept.
+`dbgo init ./database` creates a project folder with the database, an agent
+guide, a schema snapshot, migrations, and backups. Add `--force` to replace an
+existing project; a timestamped backup is kept.
 
-## Create a database
+## Create a database project
 
-- GUI: click **Create database**, choose a path, then design your first table.
-- CLI: `dbgo init ./myapp.db` (use `--force` to replace with a backup).
+- GUI: click **Create database**, choose a folder, then design your first table.
+- CLI: `dbgo init ./database` (or `dbgo init ./app.db --single-file` for a bare DB).
 - The table designer supports primary keys, NOT NULL, UNIQUE, defaults,
   foreign keys, ON DELETE actions, and indexes on foreign keys.
 - A live SQL preview shows exactly what will run. Every schema change is
-  recorded in the hidden `_dbgo_migrations` table for future D1 export.
+  recorded in the hidden `_dbgo_migrations` table and in `migrations/`.
+
+A project looks like this:
+
+```
+database/
+├── db.sqlite
+├── AGENTS.md        # instructions for coding agents
+├── schema.md        # generated schema snapshot
+├── dbgo.json        # project config
+├── migrations/      # numbered DDL, ready for D1
+└── backups/         # timestamped snapshots
+```
+
+The agent should work from that folder and use `.` as the database path:
+
+```bash
+dbgo graph . --json
+dbgo create-table . --file table.json
+dbgo backup .
+```
 
 `query` is read-only. `page` uses keyset pagination on `rowid`. Run
 `dbgo <command> --help` for details.
@@ -162,6 +192,7 @@ src/             React UI (Vite)
 ## Next
 
 - Insert / update / delete with audit + undo
+- App live refresh when the CLI changes data
 - Postgres and MySQL drivers
 - MCP mode (`dbgo mcp`)
 - D1 export and deploy
