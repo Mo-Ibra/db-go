@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { CellValue, ColumnInfo, Row } from "../types";
+import type { CellValue, ColumnInfo, Row, SortSpec } from "../types";
+import { cn } from "../lib/cn";
 
 const COLUMN_WIDTH = 180;
 const ROW_HEIGHT = 30;
@@ -28,19 +29,35 @@ function cellTitle(cell: CellValue): string {
 function renderCell(cell: CellValue) {
   switch (cell.kind) {
     case "null":
-      return <span className="cell-null">NULL</span>;
+      return <span className="italic text-muted-2">NULL</span>;
     case "integer":
-      return <span className="cell-number">{cell.value.toLocaleString()}</span>;
+      return <span className="tabular-nums text-int">{cell.value.toLocaleString()}</span>;
     case "real":
-      return <span className="cell-number">{cell.value}</span>;
+      return <span className="tabular-nums text-int">{cell.value}</span>;
     case "text":
-      return <span className="cell-text">{cell.value || "\u00a0"}</span>;
+      return <span className="text-fg">{cell.value || "\u00a0"}</span>;
     case "blob":
-      return <span className="cell-blob">BLOB · {formatBytes(cell.size)}</span>;
+      return <span className="text-blob">BLOB · {formatBytes(cell.size)}</span>;
   }
 }
 
-export function DataGrid({ columns, rows }: { columns: ColumnInfo[]; rows: Row[] }) {
+type DataGridProps = {
+  columns: ColumnInfo[];
+  rows: Row[];
+  sort?: SortSpec | null;
+  onSort?: (column: string) => void;
+  onRowClick?: (row: Row, index: number) => void;
+  selectedIndex?: number | null;
+};
+
+export function DataGrid({
+  columns,
+  rows,
+  sort,
+  onSort,
+  onRowClick,
+  selectedIndex,
+}: DataGridProps) {
   const headerRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
@@ -60,29 +77,62 @@ export function DataGrid({ columns, rows }: { columns: ColumnInfo[]; rows: Row[]
   };
 
   return (
-    <div className="grid">
-      <div className="grid-header-viewport" ref={headerRef}>
-        <div className="grid-header" style={{ width }}>
-          {columns.map((column, index) => (
-            <div
-              className="grid-cell header-cell"
-              key={`${column.name}-${index}`}
-              style={{ width: COLUMN_WIDTH }}
-            >
-              <span className="col-name">{column.name}</span>
-              <span className="col-type">
-                {column.type_name || "ANY"}
-                {column.primary_key ? " · PK" : ""}
-                {column.not_null ? " · NN" : ""}
-              </span>
-            </div>
-          ))}
+    <div className="flex h-full min-h-0 flex-col">
+      <div
+        className="flex-none overflow-hidden border-b border-line-strong bg-panel"
+        ref={headerRef}
+      >
+        <div className="flex" style={{ width }}>
+          {columns.map((column, index) => {
+            const active = sort?.column === column.name;
+            const content = (
+              <>
+                <span className="flex max-w-full items-center gap-1 truncate font-mono text-[11.5px] font-semibold text-fg">
+                  {column.name}
+                  {active && (
+                    <span className="text-accent">
+                      {sort?.direction === "asc" ? "↑" : "↓"}
+                    </span>
+                  )}
+                </span>
+                <span className="text-[8.5px] font-semibold uppercase tracking-[0.07em] text-muted-2">
+                  {column.type_name || "ANY"}
+                  {column.primary_key ? " · PK" : ""}
+                  {column.not_null ? " · NN" : ""}
+                </span>
+              </>
+            );
+
+            return onSort ? (
+              <button
+                type="button"
+                key={`${column.name}-${index}`}
+                onClick={() => onSort(column.name)}
+                className="flex h-10 flex-none flex-col items-start justify-center gap-px overflow-hidden bg-transparent px-2.5 text-left hover:bg-panel-2"
+                style={{ width: COLUMN_WIDTH }}
+                title={`Sort by ${column.name}`}
+                aria-sort={
+                  active ? (sort?.direction === "asc" ? "ascending" : "descending") : "none"
+                }
+              >
+                {content}
+              </button>
+            ) : (
+              <div
+                key={`${column.name}-${index}`}
+                className="flex h-10 flex-none flex-col items-start justify-center gap-px overflow-hidden px-2.5"
+                style={{ width: COLUMN_WIDTH }}
+              >
+                {content}
+              </div>
+            );
+          })}
         </div>
       </div>
 
-      <div className="grid-body" ref={bodyRef} onScroll={syncScroll}>
+      <div className="min-h-0 flex-1 overflow-auto" ref={bodyRef} onScroll={syncScroll}>
         {rows.length === 0 ? (
-          <div className="grid-empty">No rows</div>
+          <div className="grid h-[120px] place-items-center text-xs text-muted-2">No rows</div>
         ) : (
           <div
             style={{
@@ -93,10 +143,17 @@ export function DataGrid({ columns, rows }: { columns: ColumnInfo[]; rows: Row[]
           >
             {virtualizer.getVirtualItems().map((item) => {
               const row = rows[item.index];
+              const selected = selectedIndex === item.index;
               return (
                 <div
-                  className="grid-row"
+                  className={cn(
+                    "flex border-b border-line/60",
+                    selected ? "bg-accent/10" : "hover:bg-accent/5",
+                    onRowClick && "cursor-pointer",
+                  )}
+                  data-row={item.index}
                   key={item.key}
+                  onClick={() => onRowClick?.(row, item.index)}
                   style={{
                     position: "absolute",
                     top: 0,
@@ -108,7 +165,7 @@ export function DataGrid({ columns, rows }: { columns: ColumnInfo[]; rows: Row[]
                 >
                   {row.cells.map((cell, index) => (
                     <div
-                      className="grid-cell"
+                      className="flex flex-none items-center overflow-hidden text-ellipsis whitespace-nowrap px-2.5 font-mono text-[11.5px]"
                       key={index}
                       style={{ width: COLUMN_WIDTH }}
                       title={cellTitle(cell)}

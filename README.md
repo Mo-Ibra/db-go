@@ -7,6 +7,8 @@ SQL, and move through rows without loading the whole table into memory.
 
 ![DBGo SQL editor and results](docs/dbgo-sql.png)
 
+![DBGo row detail panel](docs/dbgo-row.png)
+
 What's here so far:
 
 - Tauri 2 native desktop window (no browser app, no server)
@@ -19,7 +21,9 @@ What's here so far:
 - NULL / integer / real / text / BLOB cell rendering
 - SQL editor (CodeMirror 6) with schema-aware autocomplete and `Ctrl/Cmd+Enter`
 - Query history and read-only query results in the same grid
+- Click-to-sort columns, server-side filtering, and a row detail panel
 - `dbgo` CLI with human, JSON, and JSONL output
+- Tailwind CSS v4 UI
 
 ## Requirements
 
@@ -88,6 +92,12 @@ prefilled with a `SELECT`, and `Ctrl/Cmd+Enter` runs the current statement.
 Results appear in the same virtualized grid. Queries are **read-only** for now;
 writes will arrive with audit logs and automatic backups.
 
+## Sort, filter, inspect
+
+- Click a column header to cycle ascending → descending → unsorted.
+- Use the filter bar for `contains`, comparisons, or null checks.
+- Click any row to open the detail panel and copy it as JSON or CSV.
+
 ## Sample data
 
 Generate a 10,000-company / 30,000-link SQLite database for testing:
@@ -119,8 +129,6 @@ src/             React UI (Vite)
 
 ## Next
 
-- Column sorting and filtering
-- Row detail panel
 - Insert / update / delete with audit + undo
 - Postgres and MySQL drivers
 - MCP mode (`dbgo mcp`)

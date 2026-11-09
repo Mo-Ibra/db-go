@@ -148,5 +148,5 @@ export function SqlEditor({ value, schema, onChange, onRun }: SqlEditorProps) {
     });
   }, [schema]);
 
-  return <div className="sql-editor-host" ref={host} />;
+  return <div className="h-full" ref={host} />;
 }

@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use db_go_core::{
-    ColumnInfo, CountResult, Database, DbInfo, Direction, Page, QueryResult, TableInfo,
+    ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec, Page, QueryResult, SortSpec,
+    TableInfo,
 };
 use tauri::State;
 
@@ -107,6 +108,29 @@ pub async fn load_page(
             page.rows.len()
         );
         Ok(page)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn load_table_page(
+    table: String,
+    filter: Option<FilterSpec>,
+    sort: Option<SortSpec>,
+    offset: i64,
+    limit: u32,
+    state: State<'_, AppState>,
+) -> Result<Page, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Page, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        database
+            .table_page(&table, filter.as_ref(), sort.as_ref(), offset, limit)
+            .map_err(to_error)
     })
     .await
     .map_err(to_error)?

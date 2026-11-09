@@ -43,6 +43,30 @@ export type QueryResult = {
 
 export type SchemaMap = Record<string, string[]>;
 
+export type SortDirection = "asc" | "desc";
+
+export type SortSpec = {
+  column: string;
+  direction: SortDirection;
+};
+
+export type FilterOp =
+  | "contains"
+  | "eq"
+  | "neq"
+  | "gt"
+  | "gte"
+  | "lt"
+  | "lte"
+  | "is_null"
+  | "not_null";
+
+export type FilterSpec = {
+  column: string;
+  op: FilterOp;
+  value: string | null;
+};
+
 export type DbInfo = {
   path: string;
   tables: TableInfo[];

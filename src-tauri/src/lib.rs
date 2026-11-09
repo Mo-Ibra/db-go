@@ -15,6 +15,7 @@ pub fn run() {
             commands::list_tables,
             commands::describe_table,
             commands::load_page,
+            commands::load_table_page,
             commands::run_query,
             commands::schema_map,
             commands::count_rows,

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use rusqlite::types::ValueRef;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,6 +19,10 @@ pub enum DbError {
     ReadOnly,
     #[error("query returned no columns")]
     NoColumns,
+    #[error("unknown column: {0}")]
+    UnknownColumn(String),
+    #[error("a value is required for the {0:?} filter")]
+    MissingFilterValue(FilterOp),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -73,6 +77,40 @@ pub struct QueryResult {
 pub struct CountResult {
     pub count: i64,
     pub capped: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SortSpec {
+    pub column: String,
+    pub direction: SortDirection,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterOp {
+    Contains,
+    Eq,
+    Neq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    IsNull,
+    NotNull,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilterSpec {
+    pub column: String,
+    pub op: FilterOp,
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -246,6 +284,121 @@ impl Database {
         })
     }
 
+    pub fn table_page(
+        &self,
+        table: &str,
+        filter: Option<&FilterSpec>,
+        sort: Option<&SortSpec>,
+        offset: i64,
+        limit: u32,
+    ) -> Result<Page> {
+        self.ensure_table(table)?;
+        let columns = self.columns(table)?;
+        let quoted = quote_ident(table);
+
+        let mut where_sql = String::new();
+        let mut params: Vec<rusqlite::types::Value> = Vec::new();
+
+        if let Some(filter) = filter {
+            if !columns.iter().any(|column| column.name == filter.column) {
+                return Err(DbError::UnknownColumn(filter.column.clone()));
+            }
+
+            let column = quote_ident(&filter.column);
+            match filter.op {
+                FilterOp::Contains => {
+                    let value = filter
+                        .value
+                        .as_deref()
+                        .ok_or(DbError::MissingFilterValue(filter.op))?;
+                    where_sql
+                        .push_str(&format!(" WHERE CAST({column} AS TEXT) LIKE ? ESCAPE '\\'"));
+                    params.push(rusqlite::types::Value::Text(format!(
+                        "%{}%",
+                        escape_like(value)
+                    )));
+                }
+                FilterOp::Eq
+                | FilterOp::Neq
+                | FilterOp::Gt
+                | FilterOp::Gte
+                | FilterOp::Lt
+                | FilterOp::Lte => {
+                    let operator = match filter.op {
+                        FilterOp::Eq => "=",
+                        FilterOp::Neq => "<>",
+                        FilterOp::Gt => ">",
+                        FilterOp::Gte => ">=",
+                        FilterOp::Lt => "<",
+                        FilterOp::Lte => "<=",
+                        _ => unreachable!(),
+                    };
+                    let value = filter
+                        .value
+                        .as_deref()
+                        .ok_or(DbError::MissingFilterValue(filter.op))?;
+                    where_sql.push_str(&format!(" WHERE {column} {operator} ?"));
+                    params.push(rusqlite::types::Value::Text(value.to_string()));
+                }
+                FilterOp::IsNull => where_sql.push_str(&format!(" WHERE {column} IS NULL")),
+                FilterOp::NotNull => where_sql.push_str(&format!(" WHERE {column} IS NOT NULL")),
+            }
+        }
+
+        let order_sql = match sort {
+            Some(sort) => {
+                if !columns.iter().any(|column| column.name == sort.column) {
+                    return Err(DbError::UnknownColumn(sort.column.clone()));
+                }
+                let column = quote_ident(&sort.column);
+                let direction = match sort.direction {
+                    SortDirection::Asc => "ASC",
+                    SortDirection::Desc => "DESC",
+                };
+                format!(" ORDER BY {column} {direction}, rowid {direction}")
+            }
+            None => " ORDER BY rowid ASC".to_string(),
+        };
+
+        let limit = limit.clamp(1, 5_000) as i64;
+        let offset = offset.max(0);
+        let sql = format!(
+            "SELECT rowid AS __dbgo_rowid, * FROM {quoted}{where_sql}{order_sql} LIMIT ? OFFSET ?"
+        );
+
+        params.push(rusqlite::types::Value::Integer(limit + 1));
+        params.push(rusqlite::types::Value::Integer(offset));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
+        let mut out = Vec::new();
+        let mut has_more = false;
+
+        while let Some(row) = rows.next()? {
+            if out.len() == limit as usize {
+                has_more = true;
+                break;
+            }
+            let rowid = row.get::<_, i64>(0).ok();
+            let mut cells = Vec::with_capacity(columns.len());
+            for index in 0..columns.len() {
+                cells.push(cell_from_value_ref(row.get_ref(index + 1)?));
+            }
+            out.push(Row { rowid, cells });
+        }
+
+        let prev_cursor = out.first().and_then(|row| row.rowid);
+        let next_cursor = out.last().and_then(|row| row.rowid);
+
+        Ok(Page {
+            columns,
+            rows: out,
+            next_cursor,
+            prev_cursor,
+            has_more,
+        })
+    }
+
     pub fn query(&self, sql: &str, limit: u32) -> Result<QueryResult> {
         let limit = limit.clamp(1, 10_000) as usize;
         let mut stmt = self.conn.prepare(sql)?;
@@ -338,6 +491,13 @@ fn cell_from_value_ref(value: ValueRef<'_>) -> CellValue {
             size: b.len(),
         },
     }
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 #[cfg(test)]
@@ -438,5 +598,78 @@ mod tests {
         let map = db.schema_map().unwrap();
         let columns: Vec<&str> = map["companies"].iter().map(String::as_str).collect();
         assert_eq!(columns, vec!["id", "name", "domain", "score", "logo"]);
+    }
+
+    #[test]
+    fn sorts_table_page() {
+        let db = memory_db();
+        let asc = SortSpec {
+            column: "name".into(),
+            direction: SortDirection::Asc,
+        };
+        let page = db.table_page("companies", None, Some(&asc), 0, 10).unwrap();
+        let names: Vec<&str> = page
+            .rows
+            .iter()
+            .map(|row| match &row.cells[1] {
+                CellValue::Text { value } => value.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(names, vec!["Acme", "Globex", "Initech"]);
+
+        let desc = SortSpec {
+            column: "name".into(),
+            direction: SortDirection::Desc,
+        };
+        let page = db
+            .table_page("companies", None, Some(&desc), 0, 10)
+            .unwrap();
+        let names: Vec<&str> = page
+            .rows
+            .iter()
+            .map(|row| match &row.cells[1] {
+                CellValue::Text { value } => value.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(names, vec!["Initech", "Globex", "Acme"]);
+    }
+
+    #[test]
+    fn filters_table_page() {
+        let db = memory_db();
+        let contains = FilterSpec {
+            column: "name".into(),
+            op: FilterOp::Contains,
+            value: Some("glob".into()),
+        };
+        let page = db
+            .table_page("companies", Some(&contains), None, 0, 10)
+            .unwrap();
+        assert_eq!(page.rows.len(), 1);
+
+        let is_null = FilterSpec {
+            column: "domain".into(),
+            op: FilterOp::IsNull,
+            value: None,
+        };
+        let page = db
+            .table_page("companies", Some(&is_null), None, 0, 10)
+            .unwrap();
+        assert_eq!(page.rows.len(), 1);
+    }
+
+    #[test]
+    fn rejects_unknown_sort_column() {
+        let db = memory_db();
+        let sort = SortSpec {
+            column: "missing".into(),
+            direction: SortDirection::Asc,
+        };
+        assert!(matches!(
+            db.table_page("companies", None, Some(&sort), 0, 10),
+            Err(DbError::UnknownColumn(_))
+        ));
     }
 }
