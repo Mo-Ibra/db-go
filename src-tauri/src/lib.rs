@@ -22,6 +22,7 @@ pub fn run() {
             commands::run_query,
             commands::schema_map,
             commands::schema_graph,
+            commands::data_version,
             commands::count_rows,
         ])
         .run(tauri::generate_context!())

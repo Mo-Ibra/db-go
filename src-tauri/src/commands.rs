@@ -283,6 +283,20 @@ pub async fn schema_graph(state: State<'_, AppState>) -> Result<SchemaGraph, Str
 }
 
 #[tauri::command]
+pub async fn data_version(state: State<'_, AppState>) -> Result<i64, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<i64, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        database.data_version().map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
 pub async fn count_rows(table: String, state: State<'_, AppState>) -> Result<CountResult, String> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<CountResult, String> {

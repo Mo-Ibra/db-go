@@ -26,6 +26,7 @@ export const api = {
   describeTable: (table: string) => invoke<ColumnInfo[]>("describe_table", { table }),
   schemaMap: () => invoke<SchemaMap>("schema_map"),
   schemaGraph: () => invoke<SchemaGraph>("schema_graph"),
+  dataVersion: () => invoke<number>("data_version"),
   loadPage: (table: string, cursor: number | null, direction: "next" | "prev", limit: number) =>
     invoke<Page>("load_page", { table, cursor, direction, limit }),
   loadTablePage: (

@@ -124,6 +124,7 @@ export default function App() {
   const [selectedRow, setSelectedRow] = useState<{ row: Row; index: number } | null>(null);
   const requestId = useRef(0);
   const bootstrapped = useRef(false);
+  const lastDataVersion = useRef<number | null>(null);
 
   const pagedMode = sort !== null || dataFilter !== null;
 
@@ -607,6 +608,82 @@ export default function App() {
       })
       .catch(() => {});
   }, [openPath]);
+
+  useEffect(() => {
+    lastDataVersion.current = null;
+  }, [db?.path]);
+
+  useEffect(() => {
+    if (!db) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        if (cancelled || loading || queryRunning) return;
+        try {
+          const version = await api.dataVersion();
+          if (cancelled) return;
+          if (lastDataVersion.current === null) {
+            lastDataVersion.current = version;
+            return;
+          }
+          if (version === lastDataVersion.current) return;
+          lastDataVersion.current = version;
+
+          const [nextTables, nextSchema, nextGraph] = await Promise.all([
+            api.listTables(),
+            api.schemaMap(),
+            api.schemaGraph(),
+          ]);
+          if (cancelled) return;
+          setTables(nextTables);
+          setSchema(nextSchema);
+          setSchemaGraph(nextGraph);
+
+          if (view === "diagram") return;
+          if (view === "sql") {
+            setNotice(
+              "Database changed by another process. Rerun the query to see fresh data.",
+            );
+            return;
+          }
+          if (!selected) return;
+          if (!nextTables.some((table) => table.name === selected)) {
+            setSelected(null);
+            setPage(null);
+            setColumns([]);
+            setCount(null);
+            return;
+          }
+
+          if (pagedMode) {
+            await loadOffsetPage(selected, pageIndex, sort, dataFilter);
+          } else {
+            await loadTable(selected, history[historyIndex]);
+          }
+        } catch {
+          // Ignore transient polling errors.
+        }
+      })();
+    }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    db,
+    view,
+    selected,
+    pagedMode,
+    pageIndex,
+    sort,
+    dataFilter,
+    history,
+    historyIndex,
+    loading,
+    queryRunning,
+    loadTable,
+    loadOffsetPage,
+  ]);
 
   const visibleTables = tables.filter((table) =>
     table.name.toLowerCase().includes(filterText.trim().toLowerCase()),

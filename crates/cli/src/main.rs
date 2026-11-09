@@ -4,17 +4,13 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use db_go_core::{
-    CellValue, ColumnInfo, CountResult, Database, Direction, Page, QueryResult, SchemaGraph,
-    TableDesign, TableInfo,
+    CellValue, ColumnInfo, CountResult, Database, Direction, FilterSpec, JsonObject, Page,
+    QueryResult, SchemaGraph, SessionSummary, TableDesign, TableInfo, WriteResult,
 };
 use serde::Serialize;
 
 #[derive(Parser)]
-#[command(
-    name = "dbgo",
-    version,
-    about = "Inspect SQLite databases from the terminal."
-)]
+#[command(name = "dbgo", version, about = "Local-first SQL workbench CLI.")]
 struct Cli {
     /// Emit a single JSON document.
     #[arg(long, global = true, conflicts_with = "jsonl")]
@@ -53,6 +49,52 @@ enum Command {
 
     /// Back up the database.
     Backup { db: PathBuf },
+
+    /// Insert rows from a JSONL file.
+    Insert {
+        db: PathBuf,
+        table: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+
+    /// Upsert rows from a JSONL file using a unique key column.
+    Upsert {
+        db: PathBuf,
+        table: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+
+    /// Update rows matching a JSON filter.
+    Update {
+        db: PathBuf,
+        table: String,
+        #[arg(long = "where")]
+        filter: String,
+        #[arg(long = "set")]
+        set: String,
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Delete rows matching a JSON filter.
+    Delete {
+        db: PathBuf,
+        table: String,
+        #[arg(long = "where")]
+        filter: String,
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// List recent write sessions from the audit log.
+    Sessions { db: PathBuf },
+
+    /// Refresh the project's AGENTS.md agent guide.
+    AgentGuide { db: PathBuf },
 
     /// List tables in a database.
     Tables { db: PathBuf },
@@ -154,6 +196,66 @@ fn run(cli: Cli) -> Result<(), String> {
             let database = open(&db)?;
             let backup = database.backup().map_err(err)?;
             println!("{}", backup.display());
+            Ok(())
+        }
+        Command::Insert { db, table, file } => {
+            let rows = read_jsonl(&file)?;
+            let database = open(&db)?;
+            let result = database.insert_rows(&table, &rows).map_err(err)?;
+            output_write(&result, cli.json, cli.jsonl)
+        }
+        Command::Upsert {
+            db,
+            table,
+            key,
+            file,
+        } => {
+            let rows = read_jsonl(&file)?;
+            let database = open(&db)?;
+            let result = database.upsert_rows(&table, &key, &rows).map_err(err)?;
+            output_write(&result, cli.json, cli.jsonl)
+        }
+        Command::Update {
+            db,
+            table,
+            filter,
+            set,
+            yes,
+        } => {
+            if !yes {
+                return Err("refusing to update without --yes".to_string());
+            }
+            let filter: FilterSpec = serde_json::from_str(&filter).map_err(err)?;
+            let values: JsonObject = serde_json::from_str(&set).map_err(err)?;
+            let database = open(&db)?;
+            let result = database
+                .update_rows(&table, &filter, &values)
+                .map_err(err)?;
+            output_write(&result, cli.json, cli.jsonl)
+        }
+        Command::Delete {
+            db,
+            table,
+            filter,
+            yes,
+        } => {
+            if !yes {
+                return Err("refusing to delete without --yes".to_string());
+            }
+            let filter: FilterSpec = serde_json::from_str(&filter).map_err(err)?;
+            let database = open(&db)?;
+            let result = database.delete_rows(&table, &filter).map_err(err)?;
+            output_write(&result, cli.json, cli.jsonl)
+        }
+        Command::Sessions { db } => {
+            let database = open(&db)?;
+            let sessions = database.sessions().map_err(err)?;
+            output_sessions(&sessions, cli.json, cli.jsonl)
+        }
+        Command::AgentGuide { db } => {
+            let database = open(&db)?;
+            let path = database.refresh_agent_guide().map_err(err)?;
+            println!("{}", path.display());
             Ok(())
         }
         Command::Tables { db } => {
@@ -285,6 +387,63 @@ fn output_graph(graph: &SchemaGraph, json: bool, jsonl: bool) -> Result<(), Stri
     }
 
     print_line(&output)
+}
+
+fn read_jsonl(path: &Path) -> Result<Vec<JsonObject>, String> {
+    let content = std::fs::read_to_string(path).map_err(err)?;
+    let mut rows = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(line).map_err(|error| format!("line {}: {error}", index + 1))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("line {}: expected a JSON object", index + 1))?
+            .clone();
+        rows.push(object);
+    }
+    if rows.is_empty() {
+        return Err(format!("no rows found in {}", path.display()));
+    }
+    Ok(rows)
+}
+
+fn output_write(result: &WriteResult, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(result);
+    }
+    if jsonl {
+        return write_jsonl(std::slice::from_ref(result));
+    }
+    print_line(&format!(
+        "{} row(s) · session {} · backup {}",
+        result.affected,
+        result.session_id,
+        result.backup_path.as_deref().unwrap_or("-")
+    ))
+}
+
+fn output_sessions(sessions: &[SessionSummary], json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(sessions);
+    }
+    if jsonl {
+        return write_jsonl(sessions);
+    }
+
+    let mut table = human_table();
+    table.set_header(vec!["session", "actions", "started_at"]);
+    for session in sessions {
+        table.add_row(vec![
+            session.session_id.clone(),
+            session.actions.to_string(),
+            session.started_at.clone(),
+        ]);
+    }
+    print_table(table)
 }
 
 fn output_count(count: &CountResult, json: bool, jsonl: bool) -> Result<(), String> {

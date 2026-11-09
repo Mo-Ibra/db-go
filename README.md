@@ -29,6 +29,8 @@ What's here so far:
 - Query history and read-only query results in the same grid
 - Click-to-sort columns, server-side filtering, and a row detail panel
 - Interactive ERD diagram: foreign-key edges, auto-layout, search, drag positions
+- CLI writes: insert, upsert, update, delete, with automatic backups and audit
+- Live refresh when the CLI changes the open database
 - `dbgo` CLI with human, JSON, and JSONL output, plus `dbgo init`
 - Tailwind CSS v4 UI
 
@@ -85,6 +87,11 @@ dbgo query   ./samples/companies.db "select id, name, city from companies limit 
 cd database
 dbgo graph . --json
 dbgo create-table . --file table.json
+dbgo insert . companies --file rows.jsonl
+dbgo upsert . companies --key domain --file rows.jsonl
+dbgo update . companies --where '{"column":"id","op":"eq","value":1}' --set '{"city":"Berlin"}' --yes
+dbgo delete . companies --where '{"column":"id","op":"eq","value":1}' --yes
+dbgo sessions .
 dbgo backup .
 
 # machine-readable
@@ -128,6 +135,37 @@ dbgo backup .
 `query` is read-only. `page` uses keyset pagination on `rowid`. Run
 `dbgo <command> --help` for details.
 
+## Writing data
+
+Every write is transactional, creates a timestamped backup in `backups/`, and
+records an audit row.
+
+```bash
+dbgo insert . companies --file rows.jsonl
+dbgo upsert . companies --key domain --file rows.jsonl
+dbgo update . companies --where '{"column":"id","op":"eq","value":1}' --set '{"city":"Berlin"}' --yes
+dbgo delete . companies --where '{"column":"id","op":"eq","value":1}' --yes
+dbgo sessions .
+```
+
+- `rows.jsonl` contains one JSON object per line.
+- `upsert` needs a `UNIQUE` or primary-key constraint on the key column.
+- `update` / `delete` require `--yes`.
+- Primary key columns cannot be updated.
+- `dbgo sessions .` lists recent write sessions and action counts.
+
+The desktop app polls `PRAGMA data_version`. When the CLI changes the database,
+the open table, schema, and diagram refresh automatically.
+
+Existing projects can refresh their agent guide with:
+
+```bash
+dbgo agent-guide .
+```
+
+The GUI SQL editor is read-only. Data writes are available through the CLI
+today; GUI data editing is the next milestone.
+
 Without installing:
 
 ```bash
@@ -138,8 +176,8 @@ cargo run -p db-go-cli -- tables ./samples/companies.db
 
 Open a database, select a table, and switch to the **SQL** tab. The editor is
 prefilled with a `SELECT`, and `Ctrl/Cmd+Enter` runs the current statement.
-Results appear in the same virtualized grid. Queries are **read-only** for now;
-writes will arrive with audit logs and automatic backups.
+Results appear in the same virtualized grid. The GUI SQL editor is **read-only**;
+data writes are available through the CLI today.
 
 ## Sort, filter, inspect
 
@@ -191,10 +229,8 @@ src/             React UI (Vite)
 
 ## Next
 
-- Insert / update / delete with audit + undo
-- App live refresh when the CLI changes data
+- GUI data editing with explicit save + audit
 - Postgres and MySQL drivers
-- MCP mode (`dbgo mcp`)
 - D1 export and deploy
 
 ## License

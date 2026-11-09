@@ -166,6 +166,22 @@ pub struct ProjectConfig {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct WriteResult {
+    pub session_id: String,
+    pub affected: usize,
+    pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub actions: i64,
+    pub started_at: String,
+}
+
+pub type JsonObject = serde_json::Map<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SchemaColumn {
     pub name: String,
     pub type_name: String,
@@ -606,54 +622,10 @@ impl Database {
         let columns = self.columns(table)?;
         let quoted = quote_ident(table);
 
-        let mut where_sql = String::new();
-        let mut params: Vec<rusqlite::types::Value> = Vec::new();
-
-        if let Some(filter) = filter {
-            if !columns.iter().any(|column| column.name == filter.column) {
-                return Err(DbError::UnknownColumn(filter.column.clone()));
-            }
-
-            let column = quote_ident(&filter.column);
-            match filter.op {
-                FilterOp::Contains => {
-                    let value = filter
-                        .value
-                        .as_deref()
-                        .ok_or(DbError::MissingFilterValue(filter.op))?;
-                    where_sql
-                        .push_str(&format!(" WHERE CAST({column} AS TEXT) LIKE ? ESCAPE '\\'"));
-                    params.push(rusqlite::types::Value::Text(format!(
-                        "%{}%",
-                        escape_like(value)
-                    )));
-                }
-                FilterOp::Eq
-                | FilterOp::Neq
-                | FilterOp::Gt
-                | FilterOp::Gte
-                | FilterOp::Lt
-                | FilterOp::Lte => {
-                    let operator = match filter.op {
-                        FilterOp::Eq => "=",
-                        FilterOp::Neq => "<>",
-                        FilterOp::Gt => ">",
-                        FilterOp::Gte => ">=",
-                        FilterOp::Lt => "<",
-                        FilterOp::Lte => "<=",
-                        _ => unreachable!(),
-                    };
-                    let value = filter
-                        .value
-                        .as_deref()
-                        .ok_or(DbError::MissingFilterValue(filter.op))?;
-                    where_sql.push_str(&format!(" WHERE {column} {operator} ?"));
-                    params.push(rusqlite::types::Value::Text(value.to_string()));
-                }
-                FilterOp::IsNull => where_sql.push_str(&format!(" WHERE {column} IS NULL")),
-                FilterOp::NotNull => where_sql.push_str(&format!(" WHERE {column} IS NOT NULL")),
-            }
-        }
+        let (where_sql, mut params) = match filter {
+            Some(filter) => filter_clause(filter, &columns)?,
+            None => (String::new(), Vec::new()),
+        };
 
         let order_sql = match sort {
             Some(sort) => {
@@ -706,6 +678,335 @@ impl Database {
             next_cursor,
             prev_cursor,
             has_more,
+        })
+    }
+
+    pub fn data_version(&self) -> Result<i64> {
+        self.conn
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(DbError::from)
+    }
+
+    pub fn refresh_agent_guide(&self) -> Result<PathBuf> {
+        let Some(project_dir) = &self.project_dir else {
+            return Err(DbError::NotAProject(
+                "agent guide requires a project folder".to_string(),
+            ));
+        };
+        let config = read_project_config(project_dir)?;
+        let path = project_dir.join("AGENTS.md");
+        std::fs::write(&path, agents_markdown(&config))?;
+        Ok(path)
+    }
+
+    pub fn sessions(&self) -> Result<Vec<SessionSummary>> {
+        self.ensure_audit_table()?;
+        let mut statement = self.conn.prepare(
+            "SELECT session_id, COUNT(*), MIN(created_at)
+             FROM _dbgo_audit
+             GROUP BY session_id
+             ORDER BY MIN(created_at) DESC
+             LIMIT 100",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(SessionSummary {
+                session_id: row.get(0)?,
+                actions: row.get(1)?,
+                started_at: row.get(2)?,
+            })
+        })?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row?);
+        }
+        Ok(sessions)
+    }
+
+    fn ensure_audit_table(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _dbgo_audit (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                rowid INTEGER,
+                action TEXT NOT NULL,
+                before_json TEXT,
+                after_json TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_dbgo_audit_session ON _dbgo_audit(session_id);",
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_rows(&self, table: &str, rows: &[JsonObject]) -> Result<WriteResult> {
+        self.ensure_table(table)?;
+        let columns = self.columns(table)?;
+        if rows.is_empty() {
+            return Ok(WriteResult {
+                session_id: new_session_id(),
+                affected: 0,
+                backup_path: None,
+            });
+        }
+
+        let backup = self.backup()?;
+        self.ensure_audit_table()?;
+        let session_id = new_session_id();
+        let quoted = quote_ident(table);
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut affected = 0;
+
+        for row in rows {
+            validate_json_columns(row, &columns)?;
+            let keys: Vec<&String> = row.keys().collect();
+            if keys.is_empty() {
+                return Err(DbError::InvalidDesign(
+                    "insert row has no columns".to_string(),
+                ));
+            }
+
+            let column_sql = keys
+                .iter()
+                .map(|key| quote_ident(key.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let placeholders = vec!["?"; keys.len()].join(", ");
+            let sql = format!("INSERT INTO {quoted} ({column_sql}) VALUES ({placeholders})");
+            let params = keys
+                .iter()
+                .map(|key| json_to_sql(row.get(key.as_str()).expect("row key exists")))
+                .collect::<Vec<_>>();
+
+            transaction.execute(&sql, rusqlite::params_from_iter(params))?;
+            let rowid = transaction.last_insert_rowid();
+            let after = fetch_row_json(&transaction, table, &columns, rowid)?;
+            record_audit(
+                &transaction,
+                &session_id,
+                table,
+                Some(rowid),
+                "insert",
+                None,
+                after.as_ref(),
+            )?;
+            affected += 1;
+        }
+
+        transaction.commit()?;
+        Ok(WriteResult {
+            session_id,
+            affected,
+            backup_path: Some(backup.display().to_string()),
+        })
+    }
+
+    pub fn upsert_rows(&self, table: &str, key: &str, rows: &[JsonObject]) -> Result<WriteResult> {
+        self.ensure_table(table)?;
+        let columns = self.columns(table)?;
+        if !columns.iter().any(|column| column.name == key) {
+            return Err(DbError::UnknownColumn(key.to_string()));
+        }
+        if rows.is_empty() {
+            return Ok(WriteResult {
+                session_id: new_session_id(),
+                affected: 0,
+                backup_path: None,
+            });
+        }
+
+        let backup = self.backup()?;
+        self.ensure_audit_table()?;
+        let session_id = new_session_id();
+        let quoted = quote_ident(table);
+        let key_ident = quote_ident(key);
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut affected = 0;
+
+        for row in rows {
+            validate_json_columns(row, &columns)?;
+            if !row.contains_key(key) {
+                return Err(DbError::InvalidDesign(format!(
+                    "upsert row is missing key column: {key}"
+                )));
+            }
+
+            let before = {
+                let sql = format!(
+                    "SELECT rowid AS __dbgo_rowid, * FROM {quoted} WHERE {key_ident} = ?1 LIMIT 1"
+                );
+                let mut statement = transaction.prepare(&sql)?;
+                let mut found =
+                    statement.query([json_to_sql(row.get(key).expect("key exists"))])?;
+                if let Some(found_row) = found.next()? {
+                    let rowid = found_row.get::<_, i64>(0)?;
+                    Some((rowid, row_to_json(&columns, found_row)?))
+                } else {
+                    None
+                }
+            };
+
+            let keys: Vec<&String> = row.keys().collect();
+            let column_sql = keys
+                .iter()
+                .map(|column| quote_ident(column.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let placeholders = vec!["?"; keys.len()].join(", ");
+
+            let mut update_columns: Vec<&String> = Vec::new();
+            for column in &keys {
+                if column.as_str() != key {
+                    update_columns.push(*column);
+                }
+            }
+
+            let conflict = if update_columns.is_empty() {
+                format!("ON CONFLICT({key_ident}) DO NOTHING")
+            } else {
+                let updates = update_columns
+                    .iter()
+                    .map(|column| {
+                        format!(
+                            "{} = excluded.{}",
+                            quote_ident(column.as_str()),
+                            quote_ident(column.as_str())
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("ON CONFLICT({key_ident}) DO UPDATE SET {updates}")
+            };
+
+            let sql =
+                format!("INSERT INTO {quoted} ({column_sql}) VALUES ({placeholders}) {conflict}");
+            let params = keys
+                .iter()
+                .map(|column| json_to_sql(row.get(column.as_str()).expect("row key exists")))
+                .collect::<Vec<_>>();
+            transaction.execute(&sql, rusqlite::params_from_iter(params))?;
+
+            let (rowid, action) = if let Some((rowid, _)) = &before {
+                (*rowid, "update")
+            } else {
+                (transaction.last_insert_rowid(), "insert")
+            };
+            let after = fetch_row_json(&transaction, table, &columns, rowid)?;
+            record_audit(
+                &transaction,
+                &session_id,
+                table,
+                Some(rowid),
+                action,
+                before.as_ref().map(|(_, value)| value),
+                after.as_ref(),
+            )?;
+            affected += 1;
+        }
+
+        transaction.commit()?;
+        Ok(WriteResult {
+            session_id,
+            affected,
+            backup_path: Some(backup.display().to_string()),
+        })
+    }
+
+    pub fn update_rows(
+        &self,
+        table: &str,
+        filter: &FilterSpec,
+        values: &JsonObject,
+    ) -> Result<WriteResult> {
+        self.ensure_table(table)?;
+        let columns = self.columns(table)?;
+        if values.is_empty() {
+            return Err(DbError::InvalidDesign("no values to update".to_string()));
+        }
+
+        let mut set_parts = Vec::new();
+        let mut set_params = Vec::new();
+        for (name, value) in values {
+            validate_json_column(name, &columns)?;
+            if columns
+                .iter()
+                .any(|column| column.name == *name && column.primary_key)
+            {
+                return Err(DbError::InvalidDesign(
+                    "updating primary key columns is not supported".to_string(),
+                ));
+            }
+            set_parts.push(format!("{} = ?", quote_ident(name)));
+            set_params.push(json_to_sql(value));
+        }
+
+        let backup = self.backup()?;
+        self.ensure_audit_table()?;
+        let session_id = new_session_id();
+        let (where_sql, where_params) = filter_clause(filter, &columns)?;
+        let quoted = quote_ident(table);
+        let transaction = self.conn.unchecked_transaction()?;
+        let matching = select_rows_json(&transaction, &quoted, &where_sql, where_params, &columns)?;
+
+        let set_sql = set_parts.join(", ");
+        for (rowid, before) in &matching {
+            let mut params = set_params.clone();
+            params.push(rusqlite::types::Value::Integer(*rowid));
+            transaction.execute(
+                &format!("UPDATE {quoted} SET {set_sql} WHERE rowid = ?"),
+                rusqlite::params_from_iter(params),
+            )?;
+            let after = fetch_row_json(&transaction, table, &columns, *rowid)?;
+            record_audit(
+                &transaction,
+                &session_id,
+                table,
+                Some(*rowid),
+                "update",
+                Some(before),
+                after.as_ref(),
+            )?;
+        }
+
+        let affected = matching.len();
+        transaction.commit()?;
+        Ok(WriteResult {
+            session_id,
+            affected,
+            backup_path: Some(backup.display().to_string()),
+        })
+    }
+
+    pub fn delete_rows(&self, table: &str, filter: &FilterSpec) -> Result<WriteResult> {
+        self.ensure_table(table)?;
+        let columns = self.columns(table)?;
+        let backup = self.backup()?;
+        self.ensure_audit_table()?;
+        let session_id = new_session_id();
+        let (where_sql, where_params) = filter_clause(filter, &columns)?;
+        let quoted = quote_ident(table);
+        let transaction = self.conn.unchecked_transaction()?;
+        let matching = select_rows_json(&transaction, &quoted, &where_sql, where_params, &columns)?;
+
+        for (rowid, before) in &matching {
+            transaction.execute(&format!("DELETE FROM {quoted} WHERE rowid = ?1"), [*rowid])?;
+            record_audit(
+                &transaction,
+                &session_id,
+                table,
+                Some(*rowid),
+                "delete",
+                Some(before),
+                None,
+            )?;
+        }
+
+        let affected = matching.len();
+        transaction.commit()?;
+        Ok(WriteResult {
+            session_id,
+            affected,
+            backup_path: Some(backup.display().to_string()),
         })
     }
 
@@ -1157,6 +1458,37 @@ The database is `{{DATABASE}}` in this folder. Never edit the database file dire
 - `dbgo page . companies --limit 50`
 - `dbgo count . companies`
 
+## Write data
+
+Use JSONL files, one JSON object per line:
+
+```jsonl
+{"name":"Acme","domain":"acme.test","city":"Berlin"}
+{"name":"Globex","domain":"globex.test","city":"Austin"}
+```
+
+```bash
+dbgo insert . companies --file rows.jsonl
+dbgo upsert . companies --key domain --file rows.jsonl
+```
+
+Updates and deletes use a JSON filter and require `--yes`:
+
+```bash
+dbgo update . companies \
+  --where '{"column":"domain","op":"eq","value":"acme.test"}' \
+  --set '{"city":"Munich"}' \
+  --yes
+
+dbgo delete . companies \
+  --where '{"column":"domain","op":"eq","value":"globex.test"}' \
+  --yes
+```
+
+- `upsert` needs a UNIQUE or PRIMARY KEY constraint on the key column.
+- Updating primary key columns is not supported.
+- Every write creates a timestamped backup and an audit row.
+
 ## Create tables
 
 Write a JSON design file, for example `table.json`:
@@ -1194,10 +1526,11 @@ Then run:
 dbgo create-table . --file table.json
 ```
 
-## Backups
+## Backups and audit
 
-- `dbgo backup .` writes a timestamped snapshot into `backups/`.
-- The database, migrations, and backups live in this folder.
+- Every write creates a timestamped snapshot in `backups/`.
+- `dbgo backup .` creates one explicitly.
+- `dbgo sessions .` lists recent write sessions and their action counts.
 
 ## Rules
 
@@ -1205,12 +1538,10 @@ dbgo create-table . --file table.json
 - Run `dbgo graph . --json` before changing the schema.
 - Use `--json` or `--jsonl` for machine-readable output.
 - Run commands from this folder and use `.` as the database path.
+- Use `--yes` for update/delete.
+- Prefer `upsert` with a natural key over blind inserts.
+- Do not update primary key columns.
 - Do not edit `migrations/` by hand unless applying them to D1.
-
-## Current limitations
-
-- Insert / update / delete are the next milestone.
-- MCP is not available yet; use the CLI.
 "#;
 
     TEMPLATE
@@ -1282,6 +1613,183 @@ fn schema_markdown(graph: &SchemaGraph) -> String {
 
 fn md_escape(value: &str) -> String {
     value.replace('|', "\\|")
+}
+
+fn filter_clause(
+    filter: &FilterSpec,
+    columns: &[ColumnInfo],
+) -> Result<(String, Vec<rusqlite::types::Value>)> {
+    if !columns.iter().any(|column| column.name == filter.column) {
+        return Err(DbError::UnknownColumn(filter.column.clone()));
+    }
+    let column = quote_ident(&filter.column);
+    let mut params = Vec::new();
+
+    let clause = match filter.op {
+        FilterOp::Contains => {
+            let value = filter
+                .value
+                .as_deref()
+                .ok_or(DbError::MissingFilterValue(filter.op))?;
+            params.push(rusqlite::types::Value::Text(format!(
+                "%{}%",
+                escape_like(value)
+            )));
+            format!(" WHERE CAST({column} AS TEXT) LIKE ? ESCAPE '\\'")
+        }
+        FilterOp::Eq
+        | FilterOp::Neq
+        | FilterOp::Gt
+        | FilterOp::Gte
+        | FilterOp::Lt
+        | FilterOp::Lte => {
+            let operator = match filter.op {
+                FilterOp::Eq => "=",
+                FilterOp::Neq => "<>",
+                FilterOp::Gt => ">",
+                FilterOp::Gte => ">=",
+                FilterOp::Lt => "<",
+                FilterOp::Lte => "<=",
+                _ => unreachable!(),
+            };
+            let value = filter
+                .value
+                .as_deref()
+                .ok_or(DbError::MissingFilterValue(filter.op))?;
+            params.push(rusqlite::types::Value::Text(value.to_string()));
+            format!(" WHERE {column} {operator} ?")
+        }
+        FilterOp::IsNull => format!(" WHERE {column} IS NULL"),
+        FilterOp::NotNull => format!(" WHERE {column} IS NOT NULL"),
+    };
+
+    Ok((clause, params))
+}
+
+fn validate_json_column(name: &str, columns: &[ColumnInfo]) -> Result<()> {
+    if columns.iter().any(|column| column.name == name) {
+        Ok(())
+    } else {
+        Err(DbError::UnknownColumn(name.to_string()))
+    }
+}
+
+fn validate_json_columns(row: &JsonObject, columns: &[ColumnInfo]) -> Result<()> {
+    for name in row.keys() {
+        validate_json_column(name, columns)?;
+    }
+    Ok(())
+}
+
+fn json_to_sql(value: &serde_json::Value) -> rusqlite::types::Value {
+    match value {
+        serde_json::Value::Null => rusqlite::types::Value::Null,
+        serde_json::Value::Bool(flag) => rusqlite::types::Value::Integer(if *flag { 1 } else { 0 }),
+        serde_json::Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                rusqlite::types::Value::Integer(integer)
+            } else if let Some(real) = number.as_f64() {
+                rusqlite::types::Value::Real(real)
+            } else {
+                rusqlite::types::Value::Text(number.to_string())
+            }
+        }
+        serde_json::Value::String(text) => rusqlite::types::Value::Text(text.clone()),
+        other => rusqlite::types::Value::Text(other.to_string()),
+    }
+}
+
+fn cell_to_json(value: ValueRef<'_>) -> serde_json::Value {
+    match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(n) => serde_json::Value::Number(n.into()),
+        ValueRef::Real(f) => serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or_else(|| serde_json::Value::String(f.to_string())),
+        ValueRef::Text(t) => serde_json::Value::String(String::from_utf8_lossy(t).into_owned()),
+        ValueRef::Blob(b) => serde_json::Value::String(format!("<blob {} bytes>", b.len())),
+    }
+}
+
+fn row_to_json(columns: &[ColumnInfo], row: &rusqlite::Row<'_>) -> Result<serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for (index, column) in columns.iter().enumerate() {
+        map.insert(column.name.clone(), cell_to_json(row.get_ref(index + 1)?));
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
+fn fetch_row_json(
+    conn: &Connection,
+    table: &str,
+    columns: &[ColumnInfo],
+    rowid: i64,
+) -> Result<Option<serde_json::Value>> {
+    let sql = format!(
+        "SELECT rowid AS __dbgo_rowid, * FROM {} WHERE rowid = ?1",
+        quote_ident(table)
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let mut rows = statement.query([rowid])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row_to_json(columns, row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn select_rows_json(
+    conn: &Connection,
+    quoted_table: &str,
+    where_sql: &str,
+    params: Vec<rusqlite::types::Value>,
+    columns: &[ColumnInfo],
+) -> Result<Vec<(i64, serde_json::Value)>> {
+    let sql = format!("SELECT rowid AS __dbgo_rowid, * FROM {quoted_table}{where_sql}");
+    let mut statement = conn.prepare(&sql)?;
+    let mut rows = statement.query(rusqlite::params_from_iter(params))?;
+    let mut matching = Vec::new();
+    while let Some(row) = rows.next()? {
+        let rowid = row.get::<_, i64>(0)?;
+        matching.push((rowid, row_to_json(columns, row)?));
+    }
+    Ok(matching)
+}
+
+fn record_audit(
+    conn: &Connection,
+    session_id: &str,
+    table: &str,
+    rowid: Option<i64>,
+    action: &str,
+    before: Option<&serde_json::Value>,
+    after: Option<&serde_json::Value>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO _dbgo_audit
+         (session_id, table_name, rowid, action, before_json, after_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            session_id,
+            table,
+            rowid,
+            action,
+            before.map(|value| value.to_string()),
+            after.map(|value| value.to_string())
+        ],
+    )?;
+    Ok(())
+}
+
+fn new_session_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}-{}",
+        now_millis(),
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn remove_sidecar(path: &Path, suffix: &str) {
@@ -1707,5 +2215,200 @@ mod tests {
         let backup = db.backup().unwrap();
         assert!(backup.starts_with(project.join("backups")));
         assert!(backup.exists());
+    }
+
+    fn temp_companies_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let (db, _) = Database::create(&path, false).unwrap();
+        db.create_table(&TableDesign {
+            name: "companies".into(),
+            columns: vec![
+                ColumnDesign {
+                    primary_key: true,
+                    not_null: true,
+                    ..column("id", "INTEGER")
+                },
+                ColumnDesign {
+                    not_null: true,
+                    unique: true,
+                    ..column("domain", "TEXT")
+                },
+                ColumnDesign {
+                    ..column("city", "TEXT")
+                },
+            ],
+            index_foreign_keys: true,
+        })
+        .unwrap();
+        (dir, db)
+    }
+
+    fn json_row(values: &[(&str, serde_json::Value)]) -> JsonObject {
+        values
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    fn city_of(db: &Database, domain: &str) -> String {
+        let result = db
+            .query(
+                &format!("SELECT city FROM companies WHERE domain = '{domain}'"),
+                10,
+            )
+            .unwrap();
+        match &result.rows[0].cells[0] {
+            CellValue::Text { value } => value.clone(),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inserts_rows_and_audits() {
+        let (_dir, db) = temp_companies_db();
+        let result = db
+            .insert_rows(
+                "companies",
+                &[json_row(&[
+                    ("id", serde_json::json!(1)),
+                    ("domain", serde_json::json!("acme.test")),
+                    ("city", serde_json::json!("Berlin")),
+                ])],
+            )
+            .unwrap();
+
+        assert_eq!(result.affected, 1);
+        assert!(result.backup_path.is_some());
+        assert_eq!(db.count_rows("companies", 100).unwrap().count, 1);
+        assert_eq!(city_of(&db, "acme.test"), "Berlin");
+
+        let sessions = db.sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].actions, 1);
+    }
+
+    #[test]
+    fn upserts_rows_on_unique_key() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+                ("city", serde_json::json!("Berlin")),
+            ])],
+        )
+        .unwrap();
+
+        let result = db
+            .upsert_rows(
+                "companies",
+                "domain",
+                &[json_row(&[
+                    ("domain", serde_json::json!("acme.test")),
+                    ("city", serde_json::json!("Munich")),
+                ])],
+            )
+            .unwrap();
+
+        assert_eq!(result.affected, 1);
+        assert_eq!(db.count_rows("companies", 100).unwrap().count, 1);
+        assert_eq!(city_of(&db, "acme.test"), "Munich");
+    }
+
+    #[test]
+    fn updates_rows_by_filter() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+                ("city", serde_json::json!("Berlin")),
+            ])],
+        )
+        .unwrap();
+
+        let filter = FilterSpec {
+            column: "domain".into(),
+            op: FilterOp::Eq,
+            value: Some("acme.test".into()),
+        };
+        let result = db
+            .update_rows(
+                "companies",
+                &filter,
+                &json_row(&[("city", serde_json::json!("Paris"))]),
+            )
+            .unwrap();
+
+        assert_eq!(result.affected, 1);
+        assert_eq!(city_of(&db, "acme.test"), "Paris");
+    }
+
+    #[test]
+    fn deletes_rows_by_filter() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+                ("city", serde_json::json!("Berlin")),
+            ])],
+        )
+        .unwrap();
+
+        let filter = FilterSpec {
+            column: "domain".into(),
+            op: FilterOp::Eq,
+            value: Some("acme.test".into()),
+        };
+        let result = db.delete_rows("companies", &filter).unwrap();
+        assert_eq!(result.affected, 1);
+        assert_eq!(db.count_rows("companies", 100).unwrap().count, 0);
+    }
+
+    #[test]
+    fn rejects_primary_key_updates() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+            ])],
+        )
+        .unwrap();
+
+        let filter = FilterSpec {
+            column: "domain".into(),
+            op: FilterOp::Eq,
+            value: Some("acme.test".into()),
+        };
+        let result = db.update_rows(
+            "companies",
+            &filter,
+            &json_row(&[("id", serde_json::json!(2))]),
+        );
+        assert!(matches!(result, Err(DbError::InvalidDesign(_))));
+    }
+
+    #[test]
+    fn data_version_changes_from_another_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version.db");
+        let (db, _) = Database::create(&path, false).unwrap();
+        let before = db.data_version().unwrap();
+
+        let other = Database::open(&path).unwrap();
+        other
+            .conn
+            .execute_batch("CREATE TABLE external_change (id INTEGER PRIMARY KEY);")
+            .unwrap();
+
+        let after = db.data_version().unwrap();
+        assert_ne!(before, after);
     }
 }
