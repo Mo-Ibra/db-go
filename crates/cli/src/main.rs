@@ -29,6 +29,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create a new empty SQLite database.
+    Init {
+        db: PathBuf,
+        /// Replace an existing database, keeping a timestamped backup.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// List tables in a database.
     Tables { db: PathBuf },
 
@@ -90,6 +98,14 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Command::Init { db, force } => {
+            let (_database, backup) = Database::create(&db, force).map_err(err)?;
+            if let Some(backup) = backup {
+                eprintln!("dbgo: existing database backed up to {}", backup.display());
+            }
+            println!("created {}", db.display());
+            Ok(())
+        }
         Command::Tables { db } => {
             let database = open(&db)?;
             let tables = database.tables().map_err(err)?;

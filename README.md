@@ -9,11 +9,16 @@ SQL, and move through rows without loading the whole table into memory.
 
 ![DBGo row detail panel](docs/dbgo-row.png)
 
+![DBGo table designer](docs/dbgo-designer.png)
+
 What's here so far:
 
 - Tauri 2 native desktop window (no browser app, no server)
 - Rust core with SQLite (WAL, memory-mapped I/O)
-- Open a SQLite file with the native file picker
+- Create a new SQLite database from scratch
+- Open an existing SQLite file with the native file picker
+- Visual table designer: types, PK/NN/unique, defaults, foreign keys, FK indexes
+- Live DDL preview; every schema change is recorded in hidden `_dbgo_migrations`
 - List tables in the sidebar
 - Browse rows with a virtualized grid
 - Keyset pagination (`rowid`) — fast on large tables
@@ -22,7 +27,7 @@ What's here so far:
 - SQL editor (CodeMirror 6) with schema-aware autocomplete and `Ctrl/Cmd+Enter`
 - Query history and read-only query results in the same grid
 - Click-to-sort columns, server-side filtering, and a row detail panel
-- `dbgo` CLI with human, JSON, and JSONL output
+- `dbgo` CLI with human, JSON, and JSONL output, plus `dbgo init`
 - Tailwind CSS v4 UI
 
 ## Requirements
@@ -65,6 +70,7 @@ That puts `dbgo` in `~/.cargo/bin`, which is already on `PATH` for Rust users.
 Then, from anywhere:
 
 ```bash
+dbgo init ./myapp.db
 dbgo tables  ./samples/companies.db
 dbgo schema  ./samples/companies.db companies
 dbgo count   ./samples/companies.db companies
@@ -75,6 +81,18 @@ dbgo query   ./samples/companies.db "select id, name, city from companies limit 
 dbgo --json  tables ./samples/companies.db
 dbgo --jsonl query  ./samples/companies.db "select * from companies limit 100"
 ```
+
+`dbgo init` creates a new empty database. Add `--force` to replace an existing
+file; a timestamped backup is kept.
+
+## Create a database
+
+- GUI: click **Create database**, choose a path, then design your first table.
+- CLI: `dbgo init ./myapp.db` (use `--force` to replace with a backup).
+- The table designer supports primary keys, NOT NULL, UNIQUE, defaults,
+  foreign keys, ON DELETE actions, and indexes on foreign keys.
+- A live SQL preview shows exactly what will run. Every schema change is
+  recorded in the hidden `_dbgo_migrations` table for future D1 export.
 
 `query` is read-only. `page` uses keyset pagination on `rowid`. Run
 `dbgo <command> --help` for details.
@@ -129,6 +147,7 @@ src/             React UI (Vite)
 
 ## Next
 
+- ERD diagram with relationships and auto-layout
 - Insert / update / delete with audit + undo
 - Postgres and MySQL drivers
 - MCP mode (`dbgo mcp`)

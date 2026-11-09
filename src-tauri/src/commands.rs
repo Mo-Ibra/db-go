@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use db_go_core::{
     ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec, Page, QueryResult, SortSpec,
-    TableInfo,
+    TableDesign, TableInfo,
 };
 use tauri::State;
 
@@ -37,9 +37,55 @@ pub async fn open_database(path: String, state: State<'_, AppState>) -> Result<D
         let info = DbInfo {
             path: path.clone(),
             tables,
+            backup_path: None,
         };
         *db.lock().map_err(|_| lock_error())? = Some(database);
         Ok(info)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn create_database(
+    path: String,
+    overwrite: bool,
+    state: State<'_, AppState>,
+) -> Result<DbInfo, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<DbInfo, String> {
+        let (database, backup) = Database::create(&path, overwrite).map_err(to_error)?;
+        let tables = database.tables().map_err(to_error)?;
+        let info = DbInfo {
+            path: path.clone(),
+            tables,
+            backup_path: backup.map(|path| path.display().to_string()),
+        };
+        eprintln!(
+            "[dbgo] created database: {path} (backup: {})",
+            info.backup_path.as_deref().unwrap_or("none")
+        );
+        *db.lock().map_err(|_| lock_error())? = Some(database);
+        Ok(info)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn create_table(
+    design: TableDesign,
+    state: State<'_, AppState>,
+) -> Result<TableInfo, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<TableInfo, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let table = database.create_table(&design).map_err(to_error)?;
+        eprintln!("[dbgo] created table: {}", table.name);
+        Ok(table)
     })
     .await
     .map_err(to_error)?

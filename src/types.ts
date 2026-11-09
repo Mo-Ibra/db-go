@@ -67,7 +67,30 @@ export type FilterSpec = {
   value: string | null;
 };
 
+export type ForeignKeyDesign = {
+  table: string;
+  column: string;
+  on_delete: string | null;
+};
+
+export type ColumnDesign = {
+  name: string;
+  type_name: string;
+  primary_key: boolean;
+  not_null: boolean;
+  unique: boolean;
+  default_value: string | null;
+  references: ForeignKeyDesign | null;
+};
+
+export type TableDesign = {
+  name: string;
+  columns: ColumnDesign[];
+  index_foreign_keys: boolean;
+};
+
 export type DbInfo = {
   path: string;
   tables: TableInfo[];
+  backup_path?: string | null;
 };

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "./lib/api";
 import type {
   ColumnInfo,
@@ -16,6 +16,7 @@ import type {
 } from "./types";
 import { DataGrid } from "./components/DataGrid";
 import { RowDetail } from "./components/RowDetail";
+import { TableDesigner } from "./components/TableDesigner";
 import { cn } from "./lib/cn";
 
 const SqlEditor = lazy(() =>
@@ -47,6 +48,7 @@ const BTN_PRIMARY_COLOR =
   "border-[#14b8a6] bg-linear-to-b from-accent to-[#14b8a6] font-bold text-[#03110f] hover:brightness-110";
 const BTN_PRIMARY = `${BTN} ${BTN_PRIMARY_COLOR}`;
 const BTN_LARGE_PRIMARY = `${BTN_LARGE} ${BTN_PRIMARY_COLOR}`;
+const BTN_LARGE_NEUTRAL = `${BTN_LARGE} border-line-strong bg-panel-2 text-fg hover:border-[#3a4a5a] hover:bg-panel-3`;
 const BTN_GHOST = `${BTN} border-transparent bg-transparent text-fg hover:border-line-strong hover:bg-panel-2`;
 const BTN_SM_GHOST = `${BTN_SM} border-transparent bg-transparent text-fg hover:border-line-strong hover:bg-panel-2`;
 const BADGE =
@@ -86,6 +88,8 @@ export default function App() {
   const [count, setCount] = useState<CountResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [showDesigner, setShowDesigner] = useState(false);
   const [view, setView] = useState<"data" | "sql">("data");
   const [sqlText, setSqlText] = useState("");
   const [schema, setSchema] = useState<SchemaMap>({});
@@ -213,32 +217,37 @@ export default function App() {
     [pageSize],
   );
 
+  const applyDbInfo = useCallback((info: DbInfo) => {
+    setDb(info);
+    setTables(info.tables);
+    setSelected(null);
+    setColumns([]);
+    setPage(null);
+    setCount(null);
+    setFilterText("");
+    setHistory([null]);
+    setHistoryIndex(0);
+    setPageIndex(0);
+    setView("data");
+    setSqlText("");
+    setSchema({});
+    setQueryResult(null);
+    setQueryRunning(false);
+    setSort(null);
+    setDataFilter(null);
+    setFilterDraft({ column: "", op: "contains", value: "" });
+    setSelectedRow(null);
+    setNotice(null);
+    setShowDesigner(false);
+  }, []);
+
   const openPath = useCallback(
     async (path: string) => {
       setLoading(true);
       setError(null);
       try {
         const info = await api.openDatabase(path);
-        setDb(info);
-        setTables(info.tables);
-        setSelected(null);
-        setColumns([]);
-        setPage(null);
-        setCount(null);
-        setFilterText("");
-        setHistory([null]);
-        setHistoryIndex(0);
-        setPageIndex(0);
-        setView("data");
-        setSqlText("");
-        setSchema({});
-        setQueryResult(null);
-        setQueryRunning(false);
-        setSort(null);
-        setDataFilter(null);
-        setFilterDraft({ column: "", op: "contains", value: "" });
-        setSelectedRow(null);
-
+        applyDbInfo(info);
         void api.schemaMap().then(setSchema).catch(() => setSchema({}));
 
         const firstTable = info.tables[0]?.name;
@@ -247,6 +256,73 @@ export default function App() {
         setError(String(cause));
       } finally {
         setLoading(false);
+      }
+    },
+    [applyDbInfo, loadTable],
+  );
+
+  const createNewDatabase = useCallback(async () => {
+    try {
+      const path = await save({
+        defaultPath: "dbgo.db",
+        filters: [
+          { name: "SQLite database", extensions: ["db", "sqlite", "sqlite3"] },
+        ],
+      });
+      if (!path) return;
+      const base = path.split(/[\\/]/).pop() ?? path;
+      const targetPath = base.includes(".") ? path : `${path}.db`;
+
+      setLoading(true);
+      setError(null);
+      try {
+        let info: DbInfo;
+        try {
+          info = await api.createDatabase(targetPath, false);
+        } catch (cause) {
+          const message = String(cause);
+          if (!message.toLowerCase().includes("already exists")) throw cause;
+          const replace = await confirm(
+            "That file already exists. Replace it? A timestamped backup will be kept.",
+            { title: "Replace database?", kind: "warning" },
+          );
+          if (!replace) return;
+          info = await api.createDatabase(targetPath, true);
+        }
+
+        applyDbInfo(info);
+        if (info.backup_path) {
+          setNotice(`Existing database backed up to ${info.backup_path}`);
+        }
+        setShowDesigner(true);
+      } finally {
+        setLoading(false);
+      }
+    } catch (cause) {
+      setError(String(cause));
+    }
+  }, [applyDbInfo]);
+
+  const handleTableCreated = useCallback(
+    async (table: string) => {
+      setShowDesigner(false);
+      try {
+        const [nextTables, nextSchema] = await Promise.all([
+          api.listTables(),
+          api.schemaMap(),
+        ]);
+        setTables(nextTables);
+        setSchema(nextSchema);
+        setView("data");
+        setSort(null);
+        setDataFilter(null);
+        setPageIndex(0);
+        setSelectedRow(null);
+        setHistory([null]);
+        setHistoryIndex(0);
+        void loadTable(table, null);
+      } catch (cause) {
+        setError(String(cause));
       }
     },
     [loadTable],
@@ -508,7 +584,7 @@ export default function App() {
     table.name.toLowerCase().includes(filterText.trim().toLowerCase()),
   );
   const currentPage = pagedMode ? pageIndex : historyIndex;
-  const rowStart = page ? currentPage * pageSize + 1 : 0;
+  const rowStart = page && page.rows.length > 0 ? currentPage * pageSize + 1 : 0;
   const rowEnd = page ? currentPage * pageSize + page.rows.length : 0;
   const detailColumns = view === "data" ? columns : (queryResult?.columns ?? []);
   const nextDisabled = loading || !page?.has_more;
@@ -537,6 +613,9 @@ export default function App() {
               {view === "sql" ? "Run query" : "Refresh"}
             </button>
           )}
+          <button className={BTN_GHOST} onClick={() => void createNewDatabase()}>
+            New database
+          </button>
           <button className={BTN_PRIMARY} onClick={() => void openDb()}>
             Open database
           </button>
@@ -549,7 +628,19 @@ export default function App() {
             <span className="text-[10.5px] font-bold uppercase tracking-[0.14em] text-muted">
               Tables
             </span>
-            <span className={BADGE}>{tables.length}</span>
+            <div className="flex items-center gap-2">
+              <span className={BADGE}>{tables.length}</span>
+              <button
+                type="button"
+                className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-transparent text-base leading-none text-muted hover:border-line-strong hover:bg-panel-2 hover:text-fg disabled:cursor-default disabled:opacity-40"
+                onClick={() => setShowDesigner(true)}
+                disabled={!db}
+                title="New table"
+                aria-label="New table"
+              >
+                +
+              </button>
+            </div>
           </div>
           <input
             className="mx-3 mb-2.5 h-[30px] flex-none rounded-[7px] border border-line bg-ink px-2.5 text-[12.5px] text-fg outline-none placeholder:text-muted-2 focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:opacity-45"
@@ -612,33 +703,69 @@ export default function App() {
             </div>
           )}
 
+          {notice && (
+            <div className="flex flex-none items-center justify-between gap-3 border-b border-accent/25 bg-accent/10 px-3.5 py-2 font-mono text-[11.5px] text-[#b8fff4]">
+              <span>{notice}</span>
+              <button
+                className="text-lg leading-none"
+                onClick={() => setNotice(null)}
+                aria-label="Dismiss notice"
+              >
+                ×
+              </button>
+            </div>
+          )}
+
           {!db ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-2.5 p-10 text-center">
               <div className="grid h-[54px] w-[54px] place-items-center rounded-[14px] bg-linear-to-br from-accent to-accent-2 text-base font-extrabold tracking-tight text-[#04110f] shadow-[0_14px_40px_rgba(45,212,191,0.25)]">
                 DB
               </div>
-              <h1 className="mt-1 text-[22px] tracking-tight">Open a SQLite database</h1>
+              <h1 className="mt-1 text-[22px] tracking-tight">Create or open a database</h1>
               <p className="max-w-[420px] text-[13px] leading-relaxed text-muted">
                 DBGo is a local-first SQL workbench. Your data never leaves this machine.
               </p>
-              <button
-                className={BTN_LARGE_PRIMARY}
-                onClick={() => void openDb()}
-              >
-                Open database
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  className={BTN_LARGE_PRIMARY}
+                  onClick={() => void createNewDatabase()}
+                >
+                  Create database
+                </button>
+                <button className={BTN_LARGE_NEUTRAL} onClick={() => void openDb()}>
+                  Open database
+                </button>
+              </div>
               <div className="mt-1.5 font-mono text-[11px] text-muted-2">Ctrl / Cmd + O</div>
             </div>
           ) : !selected ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2.5 p-10 text-center">
-              <div className="grid h-[42px] w-[42px] place-items-center rounded-[11px] border border-line bg-panel-3 text-lg text-muted">
-                ▦
+            tables.length === 0 ? (
+              <div className="flex flex-1 flex-col items-center justify-center gap-2.5 p-10 text-center">
+                <div className="grid h-[42px] w-[42px] place-items-center rounded-[11px] border border-line bg-panel-3 text-lg text-muted">
+                  ▦
+                </div>
+                <h2 className="mt-1 text-base tracking-tight">No tables yet</h2>
+                <p className="max-w-[420px] text-[13px] leading-relaxed text-muted">
+                  Create your first table to start shaping the database.
+                </p>
+                <button
+                  className={BTN_LARGE_PRIMARY}
+                  onClick={() => setShowDesigner(true)}
+                >
+                  Create your first table
+                </button>
               </div>
-              <h2 className="mt-1 text-base tracking-tight">Select a table</h2>
-              <p className="max-w-[420px] text-[13px] leading-relaxed text-muted">
-                Pick a table from the sidebar to browse its rows.
-              </p>
-            </div>
+            ) : (
+              <div className="flex flex-1 flex-col items-center justify-center gap-2.5 p-10 text-center">
+                <div className="grid h-[42px] w-[42px] place-items-center rounded-[11px] border border-line bg-panel-3 text-lg text-muted">
+                  ▦
+                </div>
+                <h2 className="mt-1 text-base tracking-tight">Select a table</h2>
+                <p className="max-w-[420px] text-[13px] leading-relaxed text-muted">
+                  Pick a table from the sidebar to browse its rows.
+                </p>
+              </div>
+            )
           ) : (
             <>
               <div className="flex h-12 flex-none items-center justify-between gap-3 border-b border-line px-3.5">
@@ -671,7 +798,12 @@ export default function App() {
                       SQL
                     </button>
                   </div>
-                  <span className="truncate font-mono text-[13px] font-semibold">{selected}</span>
+                  <span
+                    data-testid="table-title"
+                    className="truncate font-mono text-[13px] font-semibold"
+                  >
+                    {selected}
+                  </span>
                   <span className={BADGE_SUBTLE}>{columns.length} columns</span>
                   {count && !dataFilter && (
                     <span className={BADGE_SUBTLE}>
@@ -926,9 +1058,11 @@ export default function App() {
                     }`
                   : "read-only SQL"
                 : selected && page
-                  ? `rows ${rowStart.toLocaleString()}–${rowEnd.toLocaleString()} · ${
-                      pagedMode ? "filtered/sorted" : "keyset pagination"
-                    }`
+                  ? page.rows.length === 0
+                    ? "0 rows"
+                    : `rows ${rowStart.toLocaleString()}–${rowEnd.toLocaleString()} · ${
+                        pagedMode ? "filtered/sorted" : "keyset pagination"
+                      }`
                   : selected
                     ? pagedMode
                       ? "filtered/sorted"
@@ -938,6 +1072,14 @@ export default function App() {
           </footer>
         </main>
       </div>
+
+      <TableDesigner
+        open={showDesigner}
+        tables={tables}
+        schema={schema}
+        onClose={() => setShowDesigner(false)}
+        onCreated={(table) => void handleTableCreated(table)}
+      />
     </div>
   );
 }

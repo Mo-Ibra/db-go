@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use rusqlite::types::ValueRef;
@@ -23,6 +24,10 @@ pub enum DbError {
     UnknownColumn(String),
     #[error("a value is required for the {0:?} filter")]
     MissingFilterValue(FilterOp),
+    #[error("database already exists: {0}")]
+    DatabaseExists(String),
+    #[error("invalid table design: {0}")]
+    InvalidDesign(String),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -113,10 +118,36 @@ pub struct FilterSpec {
     pub value: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForeignKeyDesign {
+    pub table: String,
+    pub column: String,
+    pub on_delete: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnDesign {
+    pub name: String,
+    pub type_name: String,
+    pub primary_key: bool,
+    pub not_null: bool,
+    pub unique: bool,
+    pub default_value: Option<String>,
+    pub references: Option<ForeignKeyDesign>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableDesign {
+    pub name: String,
+    pub columns: Vec<ColumnDesign>,
+    pub index_foreign_keys: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DbInfo {
     pub path: String,
     pub tables: Vec<TableInfo>,
+    pub backup_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +177,40 @@ impl Database {
         Ok(Self { path, conn })
     }
 
+    pub fn create(path: impl AsRef<Path>, overwrite: bool) -> Result<(Self, Option<PathBuf>)> {
+        let path = path.as_ref().to_path_buf();
+        let backup = if path.exists() {
+            if !overwrite {
+                return Err(DbError::DatabaseExists(path.display().to_string()));
+            }
+            Some(backup_database(&path)?)
+        } else {
+            None
+        };
+
+        if backup.is_some() {
+            std::fs::remove_file(&path)?;
+            remove_sidecar(&path, "-wal");
+            remove_sidecar(&path, "-shm");
+        }
+
+        let database = Self::open(&path)?;
+        database.ensure_migrations_table()?;
+        Ok((database, backup))
+    }
+
+    fn ensure_migrations_table(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _dbgo_migrations (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                sql TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );",
+        )?;
+        Ok(())
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -154,7 +219,9 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT name, type
              FROM sqlite_master
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND substr(name, 1, 6) <> '_dbgo_'
              ORDER BY name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -457,16 +524,144 @@ impl Database {
         })
     }
 
-    fn ensure_table(&self, table: &str) -> Result<()> {
-        let exists: bool = self.conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM sqlite_master
-                WHERE type = 'table' AND name = ?1
-             )",
-            [table],
-            |row| row.get(0),
+    pub fn create_table(&self, design: &TableDesign) -> Result<TableInfo> {
+        let table_name = design.name.trim();
+        validate_ident(table_name)?;
+        if table_name.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(
+                "names starting with _dbgo_ are reserved".to_string(),
+            ));
+        }
+        if design.columns.is_empty() {
+            return Err(DbError::InvalidDesign(
+                "a table needs at least one column".to_string(),
+            ));
+        }
+        if self.table_exists(table_name)? {
+            return Err(DbError::InvalidDesign(format!(
+                "table already exists: {table_name}"
+            )));
+        }
+
+        let mut seen = HashSet::new();
+        let mut primary_keys = 0;
+        for column in &design.columns {
+            validate_ident(&column.name)?;
+            if !seen.insert(column.name.to_ascii_lowercase()) {
+                return Err(DbError::InvalidDesign(format!(
+                    "duplicate column: {}",
+                    column.name
+                )));
+            }
+            normalize_type(&column.type_name)?;
+            if column.primary_key {
+                primary_keys += 1;
+            }
+            if let Some(references) = &column.references {
+                self.validate_foreign_key(design, column, references)?;
+            }
+        }
+        if primary_keys > 1 {
+            return Err(DbError::InvalidDesign(
+                "only one primary key column is supported".to_string(),
+            ));
+        }
+
+        let create_sql = render_create_table(design)?;
+        let mut statements = vec![create_sql];
+        if design.index_foreign_keys {
+            for column in &design.columns {
+                if column.references.is_some() {
+                    statements.push(render_index_for_column(table_name, &column.name));
+                }
+            }
+        }
+        let migration_sql = format!("{};", statements.join(";\n"));
+
+        self.ensure_migrations_table()?;
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute_batch(&migration_sql)?;
+        transaction.execute(
+            "INSERT INTO _dbgo_migrations (name, sql) VALUES (?1, ?2)",
+            rusqlite::params![format!("create_table:{table_name}"), migration_sql],
         )?;
-        if exists {
+        transaction.commit()?;
+
+        Ok(TableInfo {
+            name: table_name.to_string(),
+            kind: "table".to_string(),
+        })
+    }
+
+    fn validate_foreign_key(
+        &self,
+        design: &TableDesign,
+        column: &ColumnDesign,
+        references: &ForeignKeyDesign,
+    ) -> Result<()> {
+        validate_ident(&references.table)?;
+        validate_ident(&references.column)?;
+        if references.table.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(
+                "cannot reference internal tables".to_string(),
+            ));
+        }
+
+        if references.table.eq_ignore_ascii_case(design.name.trim()) {
+            if !design
+                .columns
+                .iter()
+                .any(|candidate| candidate.name.eq_ignore_ascii_case(&references.column))
+            {
+                return Err(DbError::InvalidDesign(format!(
+                    "{} references missing column {}.{}",
+                    column.name, references.table, references.column
+                )));
+            }
+        } else {
+            if !self.table_exists(&references.table)? {
+                return Err(DbError::InvalidDesign(format!(
+                    "referenced table does not exist: {}",
+                    references.table
+                )));
+            }
+            let target_columns = self.columns(&references.table)?;
+            if !target_columns
+                .iter()
+                .any(|candidate| candidate.name.eq_ignore_ascii_case(&references.column))
+            {
+                return Err(DbError::InvalidDesign(format!(
+                    "{} references missing column {}.{}",
+                    column.name, references.table, references.column
+                )));
+            }
+        }
+
+        let on_delete = normalize_on_delete(references.on_delete.as_deref())?;
+        if on_delete == "SET NULL" && column.not_null {
+            return Err(DbError::InvalidDesign(format!(
+                "{} is NOT NULL, so ON DELETE SET NULL is not allowed",
+                column.name
+            )));
+        }
+        Ok(())
+    }
+
+    fn table_exists(&self, table: &str) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = ?1 COLLATE NOCASE
+                 )",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+    }
+
+    fn ensure_table(&self, table: &str) -> Result<()> {
+        if self.table_exists(table)? {
             Ok(())
         } else {
             Err(DbError::TableNotFound(table.to_string()))
@@ -498,6 +693,155 @@ fn escape_like(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+fn validate_ident(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(DbError::InvalidDesign(
+            "identifiers must be 1-64 characters".to_string(),
+        ));
+    }
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
+        return Err(DbError::InvalidDesign("identifier is empty".to_string()));
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(DbError::InvalidDesign(format!(
+            "invalid identifier: {name}"
+        )));
+    }
+    if !characters.all(|character| character.is_ascii_alphanumeric() || character == '_') {
+        return Err(DbError::InvalidDesign(format!(
+            "invalid identifier: {name}"
+        )));
+    }
+    Ok(())
+}
+
+const ALLOWED_TYPES: &[&str] = &[
+    "TEXT",
+    "INTEGER",
+    "REAL",
+    "BLOB",
+    "NUMERIC",
+    "BOOLEAN",
+    "DATE",
+    "TIMESTAMP",
+    "JSON",
+];
+
+fn normalize_type(value: &str) -> Result<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    if ALLOWED_TYPES.contains(&normalized.as_str()) {
+        Ok(normalized)
+    } else {
+        Err(DbError::InvalidDesign(format!(
+            "unsupported column type: {value}"
+        )))
+    }
+}
+
+fn normalize_on_delete(value: Option<&str>) -> Result<String> {
+    let normalized = value.unwrap_or("NO ACTION").trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "NO ACTION" | "CASCADE" | "SET NULL" | "RESTRICT" => Ok(normalized),
+        _ => Err(DbError::InvalidDesign(format!(
+            "unsupported ON DELETE action: {normalized}"
+        ))),
+    }
+}
+
+fn render_default(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok("''".to_string());
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    match upper.as_str() {
+        "NULL" => Ok("NULL".to_string()),
+        "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" => Ok(upper),
+        "TRUE" => Ok("1".to_string()),
+        "FALSE" => Ok("0".to_string()),
+        _ => {
+            if trimmed.parse::<f64>().is_ok()
+                && !trimmed.eq_ignore_ascii_case("nan")
+                && !trimmed.eq_ignore_ascii_case("inf")
+                && !trimmed.eq_ignore_ascii_case("-inf")
+            {
+                Ok(trimmed.to_string())
+            } else {
+                Ok(format!("'{}'", trimmed.replace('\'', "''")))
+            }
+        }
+    }
+}
+
+fn render_create_table(design: &TableDesign) -> Result<String> {
+    let mut definitions = Vec::with_capacity(design.columns.len());
+    for column in &design.columns {
+        let type_name = normalize_type(&column.type_name)?;
+        let mut parts = vec![quote_ident(&column.name), type_name];
+        if column.primary_key {
+            parts.push("PRIMARY KEY".to_string());
+        }
+        if column.not_null || column.primary_key {
+            parts.push("NOT NULL".to_string());
+        }
+        if column.unique && !column.primary_key {
+            parts.push("UNIQUE".to_string());
+        }
+        if let Some(default_value) = &column.default_value {
+            parts.push(format!("DEFAULT {}", render_default(default_value)?));
+        }
+        if let Some(references) = &column.references {
+            let mut reference_sql = format!(
+                "REFERENCES {}({})",
+                quote_ident(&references.table),
+                quote_ident(&references.column)
+            );
+            let on_delete = normalize_on_delete(references.on_delete.as_deref())?;
+            if on_delete != "NO ACTION" {
+                reference_sql.push_str(&format!(" ON DELETE {on_delete}"));
+            }
+            parts.push(reference_sql);
+        }
+        definitions.push(format!("  {}", parts.join(" ")));
+    }
+    Ok(format!(
+        "CREATE TABLE {} (\n{}\n)",
+        quote_ident(design.name.trim()),
+        definitions.join(",\n")
+    ))
+}
+
+fn render_index_for_column(table: &str, column: &str) -> String {
+    format!(
+        "CREATE INDEX IF NOT EXISTS {} ON {} ({})",
+        quote_ident(&format!("idx_{table}_{column}")),
+        quote_ident(table),
+        quote_ident(column)
+    )
+}
+
+fn backup_database(path: &Path) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("database");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let backup = path.with_file_name(format!("{file_name}.bak-{timestamp}"));
+    let connection = Connection::open(path)?;
+    connection.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
+    Ok(backup)
+}
+
+fn remove_sidecar(path: &Path, suffix: &str) {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    let _ = std::fs::remove_file(PathBuf::from(sidecar));
 }
 
 #[cfg(test)]
@@ -671,5 +1015,155 @@ mod tests {
             db.table_page("companies", None, Some(&sort), 0, 10),
             Err(DbError::UnknownColumn(_))
         ));
+    }
+
+    fn column(name: &str, type_name: &str) -> ColumnDesign {
+        ColumnDesign {
+            name: name.into(),
+            type_name: type_name.into(),
+            primary_key: false,
+            not_null: false,
+            unique: false,
+            default_value: None,
+            references: None,
+        }
+    }
+
+    #[test]
+    fn creates_database_with_migrations_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.db");
+        let (db, backup) = Database::create(&path, false).unwrap();
+        assert!(backup.is_none());
+        assert!(db.tables().unwrap().is_empty());
+
+        let migrations: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM _dbgo_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(migrations, 0);
+
+        assert!(matches!(
+            Database::create(&path, false),
+            Err(DbError::DatabaseExists(_))
+        ));
+    }
+
+    #[test]
+    fn creates_table_with_foreign_key_and_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.db");
+        let (db, _) = Database::create(&path, false).unwrap();
+
+        let companies = TableDesign {
+            name: "companies".into(),
+            columns: vec![
+                ColumnDesign {
+                    primary_key: true,
+                    not_null: true,
+                    ..column("id", "INTEGER")
+                },
+                ColumnDesign {
+                    not_null: true,
+                    ..column("name", "TEXT")
+                },
+            ],
+            index_foreign_keys: true,
+        };
+        db.create_table(&companies).unwrap();
+
+        let links = TableDesign {
+            name: "links".into(),
+            columns: vec![
+                ColumnDesign {
+                    primary_key: true,
+                    not_null: true,
+                    ..column("id", "INTEGER")
+                },
+                ColumnDesign {
+                    not_null: true,
+                    references: Some(ForeignKeyDesign {
+                        table: "companies".into(),
+                        column: "id".into(),
+                        on_delete: Some("CASCADE".into()),
+                    }),
+                    ..column("company_id", "INTEGER")
+                },
+            ],
+            index_foreign_keys: true,
+        };
+        db.create_table(&links).unwrap();
+
+        assert_eq!(db.tables().unwrap().len(), 2);
+
+        let (target_table, from_column, to_column): (String, String, String) = db
+            .conn
+            .query_row("PRAGMA foreign_key_list('links')", [], |row| {
+                Ok((row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .unwrap();
+        assert_eq!(target_table, "companies");
+        assert_eq!(from_column, "company_id");
+        assert_eq!(to_column, "id");
+
+        let indexes: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_links_company_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 1);
+
+        let migrations: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM _dbgo_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(migrations, 2);
+    }
+
+    #[test]
+    fn rejects_duplicate_column_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.db");
+        let (db, _) = Database::create(&path, false).unwrap();
+        let design = TableDesign {
+            name: "things".into(),
+            columns: vec![column("name", "TEXT"), column("NAME", "TEXT")],
+            index_foreign_keys: true,
+        };
+        assert!(matches!(
+            db.create_table(&design),
+            Err(DbError::InvalidDesign(_))
+        ));
+    }
+
+    #[test]
+    fn backs_up_existing_database_before_replacing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.db");
+        let (db, _) = Database::create(&path, false).unwrap();
+        db.create_table(&TableDesign {
+            name: "keep".into(),
+            columns: vec![ColumnDesign {
+                primary_key: true,
+                not_null: true,
+                ..column("id", "INTEGER")
+            }],
+            index_foreign_keys: true,
+        })
+        .unwrap();
+        drop(db);
+
+        let (fresh, backup) = Database::create(&path, true).unwrap();
+        assert!(backup.is_some());
+        assert!(backup.as_ref().unwrap().exists());
+        assert!(fresh.tables().unwrap().is_empty());
     }
 }

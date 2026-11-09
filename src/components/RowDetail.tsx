@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { CellValue, ColumnInfo, Row } from "../types";
 import { cn } from "../lib/cn";
+import { copyText } from "../lib/clipboard";
 
 type RowDetailProps = {
   columns: ColumnInfo[];
@@ -54,24 +55,6 @@ function csvValue(cell: CellValue): string {
     return `"${text.replace(/"/g, '""')}"`;
   }
   return text;
-}
-
-async function copyText(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    return;
-  } catch {
-    // Fall through to the legacy path for webviews without clipboard access.
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  textarea.remove();
 }
 
 export function RowDetail({ columns, row, index, onClose }: RowDetailProps) {

@@ -11,6 +11,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::initial_database,
             commands::open_database,
+            commands::create_database,
+            commands::create_table,
             commands::close_database,
             commands::list_tables,
             commands::describe_table,
