@@ -14,6 +14,10 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error("Table not found: {0}")]
     TableNotFound(String),
+    #[error("only read-only queries are allowed")]
+    ReadOnly,
+    #[error("query returned no columns")]
+    NoColumns,
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -55,6 +59,13 @@ pub struct Page {
     pub next_cursor: Option<i64>,
     pub prev_cursor: Option<i64>,
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryResult {
+    pub columns: Vec<ColumnInfo>,
+    pub rows: Vec<Row>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,18 +202,7 @@ impl Database {
             let mut cells = Vec::with_capacity(columns.len());
             for index in 0..columns.len() {
                 let value = row.get_ref(index + 1)?;
-                cells.push(match value {
-                    ValueRef::Null => CellValue::Null,
-                    ValueRef::Integer(n) => CellValue::Integer { value: n },
-                    ValueRef::Real(f) => CellValue::Real { value: f },
-                    ValueRef::Text(t) => CellValue::Text {
-                        value: String::from_utf8_lossy(t).into_owned(),
-                    },
-                    ValueRef::Blob(b) => CellValue::Blob {
-                        value: base64::engine::general_purpose::STANDARD.encode(b),
-                        size: b.len(),
-                    },
-                });
+                cells.push(cell_from_value_ref(value));
             }
             out.push(Row { rowid, cells });
         }
@@ -230,6 +230,52 @@ impl Database {
             next_cursor,
             prev_cursor,
             has_more,
+        })
+    }
+
+    pub fn query(&self, sql: &str, limit: u32) -> Result<QueryResult> {
+        let limit = limit.clamp(1, 10_000) as usize;
+        let mut stmt = self.conn.prepare(sql)?;
+
+        if !stmt.readonly() {
+            return Err(DbError::ReadOnly);
+        }
+
+        let columns: Vec<ColumnInfo> = stmt
+            .columns()
+            .map(|column| ColumnInfo {
+                name: column.name().to_string(),
+                type_name: column.decl_type().unwrap_or("").to_string(),
+                not_null: false,
+                primary_key: false,
+            })
+            .collect();
+
+        if columns.is_empty() {
+            return Err(DbError::NoColumns);
+        }
+
+        let column_count = columns.len();
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        let mut truncated = false;
+
+        while let Some(row) = rows.next()? {
+            if out.len() == limit {
+                truncated = true;
+                break;
+            }
+            let mut cells = Vec::with_capacity(column_count);
+            for index in 0..column_count {
+                cells.push(cell_from_value_ref(row.get_ref(index)?));
+            }
+            out.push(Row { rowid: None, cells });
+        }
+
+        Ok(QueryResult {
+            columns,
+            rows: out,
+            truncated,
         })
     }
 
@@ -264,6 +310,21 @@ impl Database {
 
 fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn cell_from_value_ref(value: ValueRef<'_>) -> CellValue {
+    match value {
+        ValueRef::Null => CellValue::Null,
+        ValueRef::Integer(n) => CellValue::Integer { value: n },
+        ValueRef::Real(f) => CellValue::Real { value: f },
+        ValueRef::Text(t) => CellValue::Text {
+            value: String::from_utf8_lossy(t).into_owned(),
+        },
+        ValueRef::Blob(b) => CellValue::Blob {
+            value: base64::engine::general_purpose::STANDARD.encode(b),
+            size: b.len(),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -328,5 +389,33 @@ mod tests {
         let count = db.count_rows("companies", 1_000_000).unwrap();
         assert_eq!(count.count, 3);
         assert!(!count.capped);
+    }
+
+    #[test]
+    fn runs_read_only_query() {
+        let db = memory_db();
+        let result = db
+            .query("SELECT id, name, score FROM companies ORDER BY id", 10)
+            .unwrap();
+        assert_eq!(result.columns.len(), 3);
+        assert_eq!(result.columns[0].name, "id");
+        assert_eq!(result.rows.len(), 3);
+        assert!(!result.truncated);
+        assert!(matches!(result.rows[0].cells[1], CellValue::Text { .. }));
+    }
+
+    #[test]
+    fn truncates_query_results() {
+        let db = memory_db();
+        let result = db.query("SELECT * FROM companies", 2).unwrap();
+        assert_eq!(result.rows.len(), 2);
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn rejects_write_statements() {
+        let db = memory_db();
+        let error = db.query("DELETE FROM companies", 10).unwrap_err();
+        assert!(matches!(error, DbError::ReadOnly));
     }
 }

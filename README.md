@@ -5,7 +5,7 @@ move through rows without loading the whole table into memory.
 
 ![DBGo browsing a SQLite table](docs/dbgo-grid.png)
 
-This is the week 1–2 slice:
+Weeks 1–2 + the CLI:
 
 - Tauri 2 native desktop window (no browser app, no server)
 - Rust core with SQLite (WAL, memory-mapped I/O)
@@ -15,6 +15,7 @@ This is the week 1–2 slice:
 - Keyset pagination (`rowid`) — fast on large tables
 - Row count capped at 1,000,000 to avoid expensive full counts
 - NULL / integer / real / text / BLOB cell rendering
+- `dbgo` CLI with human, JSON, and JSONL output
 
 ## Requirements
 
@@ -44,6 +45,38 @@ Build a release bundle:
 pnpm tauri:build
 ```
 
+## CLI
+
+Install the `dbgo` command:
+
+```bash
+cargo install --path crates/cli
+```
+
+That puts `dbgo` in `~/.cargo/bin`, which is already on `PATH` for Rust users.
+Then, from anywhere:
+
+```bash
+dbgo tables  ./samples/companies.db
+dbgo schema  ./samples/companies.db companies
+dbgo count   ./samples/companies.db companies
+dbgo page    ./samples/companies.db companies --limit 50 --cursor 201
+dbgo query   ./samples/companies.db "select id, name, city from companies limit 20"
+
+# machine-readable
+dbgo --json  tables ./samples/companies.db
+dbgo --jsonl query  ./samples/companies.db "select * from companies limit 100"
+```
+
+`query` is read-only. `page` uses keyset pagination on `rowid`. Run
+`dbgo <command> --help` for details.
+
+Without installing:
+
+```bash
+cargo run -p db-go-cli -- tables ./samples/companies.db
+```
+
 ## Sample data
 
 Generate a 10,000-company / 30,000-link SQLite database for testing:
@@ -59,6 +92,7 @@ reals, text, BLOBs, and a table larger than one page.
 
 ```bash
 cargo test -p db-go-core
+cargo clippy --workspace --all-targets -- -D warnings
 pnpm build
 pnpm tauri:build --no-bundle
 ```
@@ -67,6 +101,7 @@ pnpm tauri:build --no-bundle
 
 ```
 crates/core/     SQLite engine, schema introspection, paging
+crates/cli/      dbgo command-line interface
 src-tauri/       Tauri commands and app state
 src/             React UI (Vite)
 ```
@@ -77,7 +112,7 @@ src/             React UI (Vite)
 - Column sorting and filtering
 - Insert / update / delete with audit + undo
 - Postgres and MySQL drivers
-- CLI and MCP modes
+- MCP mode (`dbgo mcp`)
 - D1 export and deploy
 
 ## License
