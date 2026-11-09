@@ -1,11 +1,13 @@
 # DBGo
 
-A fast, local-first SQL workbench. Open a SQLite database, browse tables, and
-move through rows without loading the whole table into memory.
+A fast, local-first SQL workbench. Open a SQLite database, browse tables, write
+SQL, and move through rows without loading the whole table into memory.
 
 ![DBGo browsing a SQLite table](docs/dbgo-grid.png)
 
-Weeks 1–2 + the CLI:
+![DBGo SQL editor and results](docs/dbgo-sql.png)
+
+What's here so far:
 
 - Tauri 2 native desktop window (no browser app, no server)
 - Rust core with SQLite (WAL, memory-mapped I/O)
@@ -15,6 +17,8 @@ Weeks 1–2 + the CLI:
 - Keyset pagination (`rowid`) — fast on large tables
 - Row count capped at 1,000,000 to avoid expensive full counts
 - NULL / integer / real / text / BLOB cell rendering
+- SQL editor (CodeMirror 6) with schema-aware autocomplete and `Ctrl/Cmd+Enter`
+- Query history and read-only query results in the same grid
 - `dbgo` CLI with human, JSON, and JSONL output
 
 ## Requirements
@@ -77,6 +81,13 @@ Without installing:
 cargo run -p db-go-cli -- tables ./samples/companies.db
 ```
 
+## SQL editor
+
+Open a database, select a table, and switch to the **SQL** tab. The editor is
+prefilled with a `SELECT`, and `Ctrl/Cmd+Enter` runs the current statement.
+Results appear in the same virtualized grid. Queries are **read-only** for now;
+writes will arrive with audit logs and automatic backups.
+
 ## Sample data
 
 Generate a 10,000-company / 30,000-link SQLite database for testing:
@@ -108,8 +119,8 @@ src/             React UI (Vite)
 
 ## Next
 
-- SQL editor
 - Column sorting and filtering
+- Row detail panel
 - Insert / update / delete with audit + undo
 - Postgres and MySQL drivers
 - MCP mode (`dbgo mcp`)

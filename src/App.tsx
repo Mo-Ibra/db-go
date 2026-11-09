@@ -1,10 +1,28 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "./lib/api";
-import type { ColumnInfo, CountResult, DbInfo, Page, TableInfo } from "./types";
+import type {
+  ColumnInfo,
+  CountResult,
+  DbInfo,
+  Page,
+  QueryResult,
+  SchemaMap,
+  TableInfo,
+} from "./types";
 import { DataGrid } from "./components/DataGrid";
 
+const SqlEditor = lazy(() =>
+  import("./components/SqlEditor").then((module) => ({ default: module.SqlEditor })),
+);
+
 const PAGE_SIZES = [100, 200, 500, 1000];
+const QUERY_LIMITS = [100, 500, 1000, 5000];
+const QUERY_HISTORY_KEY = "dbgo:query-history";
+
+function quoteIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
 
 export default function App() {
   const [db, setDb] = useState<DbInfo | null>(null);
@@ -19,6 +37,24 @@ export default function App() {
   const [count, setCount] = useState<CountResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState<"data" | "sql">("data");
+  const [sqlText, setSqlText] = useState("");
+  const [schema, setSchema] = useState<SchemaMap>({});
+  const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
+  const [queryRunning, setQueryRunning] = useState(false);
+  const [queryLimit, setQueryLimit] = useState(1000);
+  const [queryHistory, setQueryHistory] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(QUERY_HISTORY_KEY);
+      if (!raw) return [];
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed)
+        ? parsed.filter((item): item is string => typeof item === "string")
+        : [];
+    } catch {
+      return [];
+    }
+  });
   const requestId = useRef(0);
   const bootstrapped = useRef(false);
 
@@ -74,6 +110,13 @@ export default function App() {
         setFilter("");
         setHistory([null]);
         setHistoryIndex(0);
+        setView("data");
+        setSqlText("");
+        setSchema({});
+        setQueryResult(null);
+        setQueryRunning(false);
+
+        void api.schemaMap().then(setSchema).catch(() => setSchema({}));
 
         const firstTable = info.tables[0]?.name;
         if (firstTable) void loadTable(firstTable, null);
@@ -105,6 +148,7 @@ export default function App() {
   const selectTable = useCallback(
     (table: string) => {
       if (table === selected) return;
+      setView("data");
       setPage(null);
       setColumns([]);
       setCount(null);
@@ -133,9 +177,55 @@ export default function App() {
     if (result) setHistoryIndex(nextIndex);
   }, [selected, history, historyIndex, loadTable]);
 
+  const runQuery = useCallback(
+    async (text: string) => {
+      const statement = text.trim();
+      if (!statement) return;
+
+      setSqlText(statement);
+      setView("sql");
+      setQueryRunning(true);
+      setError(null);
+
+      try {
+        const result = await api.runQuery(statement, queryLimit);
+        setQueryResult(result);
+        setQueryHistory((current) => {
+          const next = [statement, ...current.filter((item) => item !== statement)].slice(0, 20);
+          try {
+            localStorage.setItem(QUERY_HISTORY_KEY, JSON.stringify(next));
+          } catch {
+            // Ignore storage failures; history is a convenience.
+          }
+          return next;
+        });
+      } catch (cause) {
+        setQueryResult(null);
+        setError(String(cause));
+      } finally {
+        setQueryRunning(false);
+      }
+    },
+    [queryLimit],
+  );
+
   const refresh = useCallback(() => {
+    if (view === "sql") {
+      if (sqlText.trim()) void runQuery(sqlText);
+      return;
+    }
     if (selected) void loadTable(selected, history[historyIndex]);
-  }, [selected, history, historyIndex, loadTable]);
+  }, [view, sqlText, runQuery, selected, history, historyIndex, loadTable]);
+
+  const switchView = useCallback(
+    (next: "data" | "sql") => {
+      if (next === "sql" && !sqlText.trim() && selected) {
+        setSqlText(`SELECT * FROM ${quoteIdent(selected)} LIMIT 200;`);
+      }
+      setView(next);
+    },
+    [sqlText, selected],
+  );
 
   const changePageSize = useCallback(
     (size: number) => {
@@ -190,10 +280,10 @@ export default function App() {
             <button
               className="btn ghost"
               onClick={refresh}
-              disabled={!selected || loading}
-              title="Refresh the current page"
+              disabled={!selected || loading || queryRunning}
+              title={view === "sql" ? "Run the current query" : "Refresh the current page"}
             >
-              Refresh
+              {view === "sql" ? "Run query" : "Refresh"}
             </button>
           )}
           <button className="btn primary" onClick={() => void openDb()}>
@@ -274,6 +364,24 @@ export default function App() {
             <>
               <div className="toolbar">
                 <div className="toolbar-left">
+                  <div className="tabs" role="tablist" aria-label="View">
+                    <button
+                      role="tab"
+                      aria-selected={view === "data"}
+                      className={`tab ${view === "data" ? "active" : ""}`}
+                      onClick={() => switchView("data")}
+                    >
+                      Data
+                    </button>
+                    <button
+                      role="tab"
+                      aria-selected={view === "sql"}
+                      className={`tab ${view === "sql" ? "active" : ""}`}
+                      onClick={() => switchView("sql")}
+                    >
+                      SQL
+                    </button>
+                  </div>
                   <span className="table-title">{selected}</span>
                   <span className="badge subtle">{columns.length} columns</span>
                   {count && (
@@ -286,44 +394,119 @@ export default function App() {
                   )}
                 </div>
                 <div className="toolbar-right">
-                  <label className="page-size">
-                    Rows
-                    <select
-                      value={pageSize}
-                      onChange={(event) => changePageSize(Number(event.target.value))}
-                    >
-                      {PAGE_SIZES.map((size) => (
-                        <option key={size} value={size}>
-                          {size}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="pager">
-                    <button
-                      className="btn ghost"
-                      onClick={() => void prevPage()}
-                      disabled={historyIndex <= 0 || loading}
-                    >
-                      Previous
-                    </button>
-                    <span className="page-label">Page {historyIndex + 1}</span>
-                    <button
-                      className="btn ghost"
-                      onClick={() => void nextPage()}
-                      disabled={!page?.has_more || loading}
-                    >
-                      Next
-                    </button>
-                  </div>
+                  {view === "data" ? (
+                    <>
+                      <label className="page-size">
+                        Rows
+                        <select
+                          value={pageSize}
+                          onChange={(event) => changePageSize(Number(event.target.value))}
+                        >
+                          {PAGE_SIZES.map((size) => (
+                            <option key={size} value={size}>
+                              {size}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="pager">
+                        <button
+                          className="btn ghost"
+                          onClick={() => void prevPage()}
+                          disabled={historyIndex <= 0 || loading}
+                        >
+                          Previous
+                        </button>
+                        <span className="page-label">Page {historyIndex + 1}</span>
+                        <button
+                          className="btn ghost"
+                          onClick={() => void nextPage()}
+                          disabled={!page?.has_more || loading}
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <span className="badge subtle">read-only</span>
+                  )}
                 </div>
               </div>
 
+              {view === "sql" && (
+                <div className="sql-panel">
+                  <div className="sql-toolbar">
+                    <button
+                      className="btn primary"
+                      onClick={() => void runQuery(sqlText)}
+                      disabled={queryRunning || !sqlText.trim()}
+                    >
+                      {queryRunning ? "Running..." : "Run"}
+                    </button>
+                    <span className="sql-hint">Ctrl / Cmd + Enter</span>
+                    <label className="page-size">
+                      Max rows
+                      <select
+                        value={queryLimit}
+                        onChange={(event) => setQueryLimit(Number(event.target.value))}
+                      >
+                        {QUERY_LIMITS.map((limit) => (
+                          <option key={limit} value={limit}>
+                            {limit}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <select
+                      className="history-select"
+                      value=""
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (value) setSqlText(value);
+                      }}
+                      disabled={queryHistory.length === 0}
+                      title="Query history"
+                    >
+                      <option value="">History...</option>
+                      {queryHistory.map((item, index) => (
+                        <option key={`${index}-${item.slice(0, 24)}`} value={item}>
+                          {item.replace(/\s+/g, " ").slice(0, 90)}
+                        </option>
+                      ))}
+                    </select>
+                    {queryResult && (
+                      <span className="sql-meta">
+                        {queryResult.rows.length.toLocaleString()} rows
+                        {queryResult.truncated ? " · truncated" : ""}
+                      </span>
+                    )}
+                  </div>
+                  <div className="sql-editor-wrap">
+                    <Suspense fallback={<div className="loading">Loading editor...</div>}>
+                      <SqlEditor
+                        value={sqlText}
+                        schema={schema}
+                        onChange={setSqlText}
+                        onRun={(value) => void runQuery(value)}
+                      />
+                    </Suspense>
+                  </div>
+                </div>
+              )}
+
               <div className="grid-shell">
-                {loading && !page ? (
-                  <div className="loading">Loading rows...</div>
+                {view === "data" ? (
+                  loading && !page ? (
+                    <div className="loading">Loading rows...</div>
+                  ) : (
+                    <DataGrid columns={columns} rows={page?.rows ?? []} />
+                  )
+                ) : queryRunning ? (
+                  <div className="loading">Running query...</div>
+                ) : queryResult ? (
+                  <DataGrid columns={queryResult.columns} rows={queryResult.rows} />
                 ) : (
-                  <DataGrid columns={columns} rows={page?.rows ?? []} />
+                  <div className="loading">Run a query to see results</div>
                 )}
               </div>
             </>
@@ -334,10 +517,17 @@ export default function App() {
               {db ? db.path : "No database open"}
             </span>
             <span className="status-right">
-              {selected && page
-                ? `rows ${rowStart.toLocaleString()}–${rowEnd.toLocaleString()} · `
-                : ""}
-              {selected ? "keyset pagination" : "SQLite"}
+              {view === "sql"
+                ? queryResult
+                  ? `query · ${queryResult.rows.length.toLocaleString()} rows${
+                      queryResult.truncated ? " · truncated" : ""
+                    }`
+                  : "read-only SQL"
+                : selected && page
+                  ? `rows ${rowStart.toLocaleString()}–${rowEnd.toLocaleString()} · keyset pagination`
+                  : selected
+                    ? "keyset pagination"
+                    : "SQLite"}
             </span>
           </footer>
         </main>

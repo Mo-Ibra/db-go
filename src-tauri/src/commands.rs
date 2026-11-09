@@ -1,4 +1,8 @@
-use db_go_core::{ColumnInfo, CountResult, Database, DbInfo, Direction, Page, TableInfo};
+use std::collections::BTreeMap;
+
+use db_go_core::{
+    ColumnInfo, CountResult, Database, DbInfo, Direction, Page, QueryResult, TableInfo,
+};
 use tauri::State;
 
 use crate::state::AppState;
@@ -104,6 +108,50 @@ pub async fn load_page(
         );
         Ok(page)
     })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn run_query(
+    sql: String,
+    limit: u32,
+    state: State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<QueryResult, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let result = database.query(&sql, limit).map_err(to_error)?;
+        eprintln!(
+            "[dbgo] query rows={} truncated={}",
+            result.rows.len(),
+            result.truncated
+        );
+        Ok(result)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn schema_map(
+    state: State<'_, AppState>,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<BTreeMap<String, Vec<String>>, String> {
+            let guard = db.lock().map_err(|_| lock_error())?;
+            let database = guard
+                .as_ref()
+                .ok_or_else(|| "no database open".to_string())?;
+            let map = database.schema_map().map_err(to_error)?;
+            eprintln!("[dbgo] schema map: {} tables", map.len());
+            Ok(map)
+        },
+    )
     .await
     .map_err(to_error)?
 }

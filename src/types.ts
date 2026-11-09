@@ -35,6 +35,14 @@ export type CountResult = {
   capped: boolean;
 };
 
+export type QueryResult = {
+  columns: ColumnInfo[];
+  rows: Row[];
+  truncated: boolean;
+};
+
+export type SchemaMap = Record<string, string[]>;
+
 export type DbInfo = {
   path: string;
   tables: TableInfo[];

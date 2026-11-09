@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -129,6 +130,18 @@ impl Database {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    pub fn schema_map(&self) -> Result<BTreeMap<String, Vec<String>>> {
+        let mut map = BTreeMap::new();
+        for table in self.tables()? {
+            let columns = self.columns(&table.name)?;
+            map.insert(
+                table.name,
+                columns.into_iter().map(|column| column.name).collect(),
+            );
+        }
+        Ok(map)
     }
 
     pub fn columns(&self, table: &str) -> Result<Vec<ColumnInfo>> {
@@ -417,5 +430,13 @@ mod tests {
         let db = memory_db();
         let error = db.query("DELETE FROM companies", 10).unwrap_err();
         assert!(matches!(error, DbError::ReadOnly));
+    }
+
+    #[test]
+    fn builds_schema_map() {
+        let db = memory_db();
+        let map = db.schema_map().unwrap();
+        let columns: Vec<&str> = map["companies"].iter().map(String::as_str).collect();
+        assert_eq!(columns, vec!["id", "name", "domain", "score", "logo"]);
     }
 }
