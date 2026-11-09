@@ -10,6 +10,7 @@ import type {
   Page,
   QueryResult,
   Row,
+  SchemaGraph,
   SchemaMap,
   SortSpec,
   TableInfo,
@@ -21,6 +22,10 @@ import { cn } from "./lib/cn";
 
 const SqlEditor = lazy(() =>
   import("./components/SqlEditor").then((module) => ({ default: module.SqlEditor })),
+);
+
+const DiagramView = lazy(() =>
+  import("./components/DiagramView").then((module) => ({ default: module.DiagramView })),
 );
 
 const PAGE_SIZES = [100, 200, 500, 1000];
@@ -90,9 +95,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [showDesigner, setShowDesigner] = useState(false);
-  const [view, setView] = useState<"data" | "sql">("data");
+  const [view, setView] = useState<"data" | "sql" | "diagram">("data");
   const [sqlText, setSqlText] = useState("");
   const [schema, setSchema] = useState<SchemaMap>({});
+  const [schemaGraph, setSchemaGraph] = useState<SchemaGraph | null>(null);
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [queryRunning, setQueryRunning] = useState(false);
   const [queryLimit, setQueryLimit] = useState(1000);
@@ -231,6 +237,7 @@ export default function App() {
     setView("data");
     setSqlText("");
     setSchema({});
+    setSchemaGraph(null);
     setQueryResult(null);
     setQueryRunning(false);
     setSort(null);
@@ -248,7 +255,15 @@ export default function App() {
       try {
         const info = await api.openDatabase(path);
         applyDbInfo(info);
-        void api.schemaMap().then(setSchema).catch(() => setSchema({}));
+        void Promise.all([api.schemaMap(), api.schemaGraph()])
+          .then(([nextSchema, nextGraph]) => {
+            setSchema(nextSchema);
+            setSchemaGraph(nextGraph);
+          })
+          .catch(() => {
+            setSchema({});
+            setSchemaGraph(null);
+          });
 
         const firstTable = info.tables[0]?.name;
         if (firstTable) void loadTable(firstTable, null);
@@ -291,6 +306,7 @@ export default function App() {
         }
 
         applyDbInfo(info);
+        void api.schemaGraph().then(setSchemaGraph).catch(() => setSchemaGraph(null));
         if (info.backup_path) {
           setNotice(`Existing database backed up to ${info.backup_path}`);
         }
@@ -307,12 +323,14 @@ export default function App() {
     async (table: string) => {
       setShowDesigner(false);
       try {
-        const [nextTables, nextSchema] = await Promise.all([
+        const [nextTables, nextSchema, nextGraph] = await Promise.all([
           api.listTables(),
           api.schemaMap(),
+          api.schemaGraph(),
         ]);
         setTables(nextTables);
         setSchema(nextSchema);
+        setSchemaGraph(nextGraph);
         setView("data");
         setSort(null);
         setDataFilter(null);
@@ -503,6 +521,13 @@ export default function App() {
   ]);
 
   const refresh = useCallback(() => {
+    if (view === "diagram") {
+      void api
+        .schemaGraph()
+        .then(setSchemaGraph)
+        .catch((cause) => setError(String(cause)));
+      return;
+    }
     if (view === "sql") {
       if (sqlText.trim()) void runQuery(sqlText);
       return;
@@ -529,14 +554,20 @@ export default function App() {
   ]);
 
   const switchView = useCallback(
-    (next: "data" | "sql") => {
+    (next: "data" | "sql" | "diagram") => {
       if (next === "sql" && !sqlText.trim() && selected) {
         setSqlText(`SELECT * FROM ${quoteIdent(selected)} LIMIT 200;`);
+      }
+      if (next === "diagram" && !schemaGraph) {
+        void api
+          .schemaGraph()
+          .then(setSchemaGraph)
+          .catch((cause) => setError(String(cause)));
       }
       setSelectedRow(null);
       setView(next);
     },
-    [sqlText, selected],
+    [sqlText, selected, schemaGraph],
   );
 
   const changePageSize = useCallback(
@@ -608,7 +639,13 @@ export default function App() {
               className={BTN_GHOST}
               onClick={refresh}
               disabled={!selected || loading || queryRunning}
-              title={view === "sql" ? "Run the current query" : "Refresh the current page"}
+              title={
+                view === "sql"
+                  ? "Run the current query"
+                  : view === "diagram"
+                    ? "Refresh the schema graph"
+                    : "Refresh the current page"
+              }
             >
               {view === "sql" ? "Run query" : "Refresh"}
             </button>
@@ -797,21 +834,46 @@ export default function App() {
                     >
                       SQL
                     </button>
+                    <button
+                      role="tab"
+                      aria-selected={view === "diagram"}
+                      className={cn(
+                        "h-6 rounded-[5px] px-2.5 text-[11.5px] font-semibold",
+                        view === "diagram" ? "bg-panel-3 text-fg" : "text-muted hover:text-fg",
+                      )}
+                      onClick={() => switchView("diagram")}
+                    >
+                      Diagram
+                    </button>
                   </div>
-                  <span
-                    data-testid="table-title"
-                    className="truncate font-mono text-[13px] font-semibold"
-                  >
-                    {selected}
-                  </span>
-                  <span className={BADGE_SUBTLE}>{columns.length} columns</span>
-                  {count && !dataFilter && (
-                    <span className={BADGE_SUBTLE}>
-                      {count.capped
-                        ? `${count.count.toLocaleString()}+`
-                        : count.count.toLocaleString()}{" "}
-                      rows
-                    </span>
+                  {view === "diagram" ? (
+                    <>
+                      <span className="truncate font-mono text-[13px] font-semibold">Schema</span>
+                      <span className={BADGE_SUBTLE}>
+                        {schemaGraph?.tables.length ?? 0} tables
+                      </span>
+                      <span className={BADGE_SUBTLE}>
+                        {schemaGraph?.relationships.length ?? 0} relations
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span
+                        data-testid="table-title"
+                        className="truncate font-mono text-[13px] font-semibold"
+                      >
+                        {selected}
+                      </span>
+                      <span className={BADGE_SUBTLE}>{columns.length} columns</span>
+                      {count && !dataFilter && (
+                        <span className={BADGE_SUBTLE}>
+                          {count.capped
+                            ? `${count.count.toLocaleString()}+`
+                            : count.count.toLocaleString()}{" "}
+                          rows
+                        </span>
+                      )}
+                    </>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
@@ -852,8 +914,10 @@ export default function App() {
                         </button>
                       </div>
                     </>
-                  ) : (
+                  ) : view === "sql" ? (
                     <span className={BADGE_SUBTLE}>read-only</span>
+                  ) : (
+                    <span className={BADGE_SUBTLE}>schema</span>
                   )}
                 </div>
               </div>
@@ -1000,49 +1064,77 @@ export default function App() {
                 </div>
               )}
 
-              <div className="flex min-h-0 flex-1">
-                <div className="flex min-w-0 flex-1 flex-col">
-                  {view === "data" ? (
-                    loading && !page ? (
+              {view === "diagram" ? (
+                <div className="flex min-h-0 flex-1">
+                  {!schemaGraph ? (
+                    <div className="grid flex-1 place-items-center text-xs text-muted">
+                      Loading diagram...
+                    </div>
+                  ) : (
+                    <Suspense
+                      fallback={
+                        <div className="grid flex-1 place-items-center text-xs text-muted">
+                          Loading diagram...
+                        </div>
+                      }
+                    >
+                      <DiagramView
+                        graph={schemaGraph}
+                        dbPath={db?.path ?? ""}
+                        onOpenTable={(table) => {
+                          setView("data");
+                          void loadTable(table, null);
+                        }}
+                        onCreateTable={() => setShowDesigner(true)}
+                      />
+                    </Suspense>
+                  )}
+                </div>
+              ) : (
+                <div className="flex min-h-0 flex-1">
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    {view === "data" ? (
+                      loading && !page ? (
+                        <div className="grid flex-1 place-items-center text-xs text-muted">
+                          Loading rows...
+                        </div>
+                      ) : (
+                        <DataGrid
+                          columns={columns}
+                          rows={page?.rows ?? []}
+                          sort={sort}
+                          onSort={toggleSort}
+                          onRowClick={(row, index) => setSelectedRow({ row, index })}
+                          selectedIndex={selectedRow?.index ?? null}
+                        />
+                      )
+                    ) : queryRunning ? (
                       <div className="grid flex-1 place-items-center text-xs text-muted">
-                        Loading rows...
+                        Running query...
                       </div>
-                    ) : (
+                    ) : queryResult ? (
                       <DataGrid
-                        columns={columns}
-                        rows={page?.rows ?? []}
-                        sort={sort}
-                        onSort={toggleSort}
+                        columns={queryResult.columns}
+                        rows={queryResult.rows}
                         onRowClick={(row, index) => setSelectedRow({ row, index })}
                         selectedIndex={selectedRow?.index ?? null}
                       />
-                    )
-                  ) : queryRunning ? (
-                    <div className="grid flex-1 place-items-center text-xs text-muted">
-                      Running query...
-                    </div>
-                  ) : queryResult ? (
-                    <DataGrid
-                      columns={queryResult.columns}
-                      rows={queryResult.rows}
-                      onRowClick={(row, index) => setSelectedRow({ row, index })}
-                      selectedIndex={selectedRow?.index ?? null}
+                    ) : (
+                      <div className="grid flex-1 place-items-center text-xs text-muted">
+                        Run a query to see results
+                      </div>
+                    )}
+                  </div>
+                  {selectedRow && detailColumns.length > 0 && (
+                    <RowDetail
+                      columns={detailColumns}
+                      row={selectedRow.row}
+                      index={selectedRow.index}
+                      onClose={() => setSelectedRow(null)}
                     />
-                  ) : (
-                    <div className="grid flex-1 place-items-center text-xs text-muted">
-                      Run a query to see results
-                    </div>
                   )}
                 </div>
-                {selectedRow && detailColumns.length > 0 && (
-                  <RowDetail
-                    columns={detailColumns}
-                    row={selectedRow.row}
-                    index={selectedRow.index}
-                    onClose={() => setSelectedRow(null)}
-                  />
-                )}
-              </div>
+              )}
             </>
           )}
 
@@ -1051,23 +1143,27 @@ export default function App() {
               {db ? db.path : "No database open"}
             </span>
             <span className="whitespace-nowrap">
-              {view === "sql"
-                ? queryResult
-                  ? `query · ${queryResult.rows.length.toLocaleString()} rows${
-                      queryResult.truncated ? " · truncated" : ""
-                    }`
-                  : "read-only SQL"
-                : selected && page
-                  ? page.rows.length === 0
-                    ? "0 rows"
-                    : `rows ${rowStart.toLocaleString()}–${rowEnd.toLocaleString()} · ${
-                        pagedMode ? "filtered/sorted" : "keyset pagination"
+              {view === "diagram"
+                ? `${schemaGraph?.tables.length ?? 0} tables · ${
+                    schemaGraph?.relationships.length ?? 0
+                  } relationships`
+                : view === "sql"
+                  ? queryResult
+                    ? `query · ${queryResult.rows.length.toLocaleString()} rows${
+                        queryResult.truncated ? " · truncated" : ""
                       }`
-                  : selected
-                    ? pagedMode
-                      ? "filtered/sorted"
-                      : "keyset pagination"
-                    : "SQLite"}
+                    : "read-only SQL"
+                  : selected && page
+                    ? page.rows.length === 0
+                      ? "0 rows"
+                      : `rows ${rowStart.toLocaleString()}–${rowEnd.toLocaleString()} · ${
+                          pagedMode ? "filtered/sorted" : "keyset pagination"
+                        }`
+                    : selected
+                      ? pagedMode
+                        ? "filtered/sorted"
+                        : "keyset pagination"
+                      : "SQLite"}
             </span>
           </footer>
         </main>

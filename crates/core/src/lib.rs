@@ -150,6 +150,39 @@ pub struct DbInfo {
     pub backup_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaColumn {
+    pub name: String,
+    pub type_name: String,
+    pub not_null: bool,
+    pub primary_key: bool,
+    pub foreign_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaTable {
+    pub name: String,
+    pub columns: Vec<SchemaColumn>,
+    pub primary_key: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Relationship {
+    pub id: String,
+    pub from_table: String,
+    pub from_column: String,
+    pub to_table: String,
+    pub to_column: String,
+    pub on_delete: String,
+    pub on_update: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaGraph {
+    pub tables: Vec<SchemaTable>,
+    pub relationships: Vec<Relationship>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Next,
@@ -247,6 +280,86 @@ impl Database {
             );
         }
         Ok(map)
+    }
+
+    pub fn schema_graph(&self) -> Result<SchemaGraph> {
+        let tables = self.tables()?;
+        let mut nodes = Vec::with_capacity(tables.len());
+        let mut relationships = Vec::new();
+
+        for table in &tables {
+            let columns = self.columns(&table.name)?;
+            let mut foreign_key_columns = HashSet::new();
+            let pragma = format!("PRAGMA foreign_key_list({})", quote_ident(&table.name));
+            let mut statement = self.conn.prepare(&pragma)?;
+            let mut rows = statement.query([])?;
+
+            while let Some(row) = rows.next()? {
+                let to_table: String = row.get(2)?;
+                let from_column: String = row.get(3)?;
+                let to_column: Option<String> = row.get(4)?;
+                let on_update: String = row.get(5)?;
+                let on_delete: String = row.get(6)?;
+                let to_column = match to_column {
+                    Some(column) if !column.is_empty() => column,
+                    _ => self
+                        .primary_key_column(&to_table)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default(),
+                };
+                if to_column.is_empty() {
+                    continue;
+                }
+
+                foreign_key_columns.insert(from_column.clone());
+                relationships.push(Relationship {
+                    id: format!("{}:{}->{}:{}", table.name, from_column, to_table, to_column),
+                    from_table: table.name.clone(),
+                    from_column,
+                    to_table,
+                    to_column,
+                    on_delete,
+                    on_update,
+                });
+            }
+
+            let primary_key = columns
+                .iter()
+                .filter(|column| column.primary_key)
+                .map(|column| column.name.clone())
+                .collect();
+
+            let columns = columns
+                .into_iter()
+                .map(|column| SchemaColumn {
+                    name: column.name.clone(),
+                    type_name: column.type_name,
+                    not_null: column.not_null,
+                    primary_key: column.primary_key,
+                    foreign_key: foreign_key_columns.contains(&column.name),
+                })
+                .collect();
+
+            nodes.push(SchemaTable {
+                name: table.name.clone(),
+                columns,
+                primary_key,
+            });
+        }
+
+        Ok(SchemaGraph {
+            tables: nodes,
+            relationships,
+        })
+    }
+
+    fn primary_key_column(&self, table: &str) -> Result<Option<String>> {
+        let columns = self.columns(table)?;
+        Ok(columns
+            .into_iter()
+            .find(|column| column.primary_key)
+            .map(|column| column.name))
     }
 
     pub fn columns(&self, table: &str) -> Result<Vec<ColumnInfo>> {
@@ -942,6 +1055,43 @@ mod tests {
         let map = db.schema_map().unwrap();
         let columns: Vec<&str> = map["companies"].iter().map(String::as_str).collect();
         assert_eq!(columns, vec!["id", "name", "domain", "score", "logo"]);
+    }
+
+    #[test]
+    fn builds_schema_graph() {
+        let db = memory_db();
+        db.conn
+            .execute_batch(
+                "CREATE TABLE links (
+                    id INTEGER PRIMARY KEY,
+                    company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE
+                );",
+            )
+            .unwrap();
+
+        let graph = db.schema_graph().unwrap();
+        assert_eq!(graph.tables.len(), 2);
+
+        let links = graph
+            .tables
+            .iter()
+            .find(|table| table.name == "links")
+            .unwrap();
+        let company_id = links
+            .columns
+            .iter()
+            .find(|column| column.name == "company_id")
+            .unwrap();
+        assert!(company_id.foreign_key);
+        assert_eq!(links.primary_key, vec!["id".to_string()]);
+
+        assert_eq!(graph.relationships.len(), 1);
+        let relationship = &graph.relationships[0];
+        assert_eq!(relationship.from_table, "links");
+        assert_eq!(relationship.from_column, "company_id");
+        assert_eq!(relationship.to_table, "companies");
+        assert_eq!(relationship.to_column, "id");
+        assert_eq!(relationship.on_delete, "CASCADE");
     }
 
     #[test]

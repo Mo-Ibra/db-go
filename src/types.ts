@@ -43,6 +43,35 @@ export type QueryResult = {
 
 export type SchemaMap = Record<string, string[]>;
 
+export type SchemaColumn = {
+  name: string;
+  type_name: string;
+  not_null: boolean;
+  primary_key: boolean;
+  foreign_key: boolean;
+};
+
+export type SchemaTable = {
+  name: string;
+  columns: SchemaColumn[];
+  primary_key: string[];
+};
+
+export type Relationship = {
+  id: string;
+  from_table: string;
+  from_column: string;
+  to_table: string;
+  to_column: string;
+  on_delete: string;
+  on_update: string;
+};
+
+export type SchemaGraph = {
+  tables: SchemaTable[];
+  relationships: Relationship[];
+};
+
 export type SortDirection = "asc" | "desc";
 
 export type SortSpec = {

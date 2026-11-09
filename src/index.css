@@ -68,3 +68,75 @@
     background: transparent;
   }
 }
+
+@layer components {
+  .react-flow__controls {
+    @apply overflow-hidden rounded-lg border border-line bg-panel shadow-lg;
+  }
+
+  .react-flow__controls-button {
+    @apply border-line bg-panel text-fg hover:bg-panel-2;
+  }
+
+  .react-flow__controls-button svg {
+    fill: currentColor;
+  }
+
+  .react-flow__minimap {
+    @apply rounded-lg border border-line bg-panel;
+  }
+
+  .react-flow__edge-text {
+    @apply fill-muted;
+  }
+
+  .react-flow__edge-textbg {
+    @apply fill-panel;
+  }
+}
+
+/* React Flow ships unlayered defaults; these need to win over them. */
+.react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--color-line) !important;
+  border-radius: 8px !important;
+  background: var(--color-panel) !important;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.react-flow__controls-button {
+  border-bottom: 1px solid var(--color-line) !important;
+  background: var(--color-panel) !important;
+  color: var(--color-fg) !important;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--color-panel-2) !important;
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor !important;
+}
+
+.react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid var(--color-line) !important;
+  border-radius: 8px !important;
+  background: var(--color-panel) !important;
+}
+
+.react-flow__minimap svg {
+  background: var(--color-panel) !important;
+}
+
+.react-flow__minimap-mask {
+  fill: rgba(10, 12, 15, 0.72) !important;
+}
+
+.react-flow__edge-text {
+  fill: var(--color-muted);
+}
+
+.react-flow__edge-textbg {
+  fill: var(--color-panel);
+}

@@ -27,6 +27,7 @@ What's here so far:
 - SQL editor (CodeMirror 6) with schema-aware autocomplete and `Ctrl/Cmd+Enter`
 - Query history and read-only query results in the same grid
 - Click-to-sort columns, server-side filtering, and a row detail panel
+- Interactive ERD diagram: foreign-key edges, auto-layout, search, drag positions
 - `dbgo` CLI with human, JSON, and JSONL output, plus `dbgo init`
 - Tailwind CSS v4 UI
 
@@ -116,6 +117,19 @@ writes will arrive with audit logs and automatic backups.
 - Use the filter bar for `contains`, comparisons, or null checks.
 - Click any row to open the detail panel and copy it as JSON or CSV.
 
+## Diagram
+
+Switch to the **Diagram** tab to see every table and its foreign-key
+relationships.
+
+![DBGo schema diagram](docs/dbgo-diagram.png)
+
+- Columns show `PK` / `FK` badges and types.
+- Drag tables to rearrange; positions persist per database.
+- **Auto layout** re-runs Dagre; **Fit view** zooms to the whole schema.
+- Search highlights matching tables.
+- Double-click a table to open its rows.
+
 ## Sample data
 
 Generate a 10,000-company / 30,000-link SQLite database for testing:
@@ -147,7 +161,6 @@ src/             React UI (Vite)
 
 ## Next
 
-- ERD diagram with relationships and auto-layout
 - Insert / update / delete with audit + undo
 - Postgres and MySQL drivers
 - MCP mode (`dbgo mcp`)

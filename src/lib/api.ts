@@ -6,6 +6,7 @@ import type {
   FilterSpec,
   Page,
   QueryResult,
+  SchemaGraph,
   SchemaMap,
   SortSpec,
   TableDesign,
@@ -22,6 +23,7 @@ export const api = {
   listTables: () => invoke<TableInfo[]>("list_tables"),
   describeTable: (table: string) => invoke<ColumnInfo[]>("describe_table", { table }),
   schemaMap: () => invoke<SchemaMap>("schema_map"),
+  schemaGraph: () => invoke<SchemaGraph>("schema_graph"),
   loadPage: (table: string, cursor: number | null, direction: "next" | "prev", limit: number) =>
     invoke<Page>("load_page", { table, cursor, direction, limit }),
   loadTablePage: (

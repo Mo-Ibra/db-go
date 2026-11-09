@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use db_go_core::{
-    ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec, Page, QueryResult, SortSpec,
-    TableDesign, TableInfo,
+    ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec, Page, QueryResult,
+    SchemaGraph, SortSpec, TableDesign, TableInfo,
 };
 use tauri::State;
 
@@ -222,6 +222,26 @@ pub async fn schema_map(
             Ok(map)
         },
     )
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn schema_graph(state: State<'_, AppState>) -> Result<SchemaGraph, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<SchemaGraph, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let graph = database.schema_graph().map_err(to_error)?;
+        eprintln!(
+            "[dbgo] schema graph: {} tables, {} relationships",
+            graph.tables.len(),
+            graph.relationships.len()
+        );
+        Ok(graph)
+    })
     .await
     .map_err(to_error)?
 }
