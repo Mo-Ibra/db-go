@@ -1,0 +1,12 @@
+node_modules
+dist
+target
+src-tauri/target
+src-tauri/gen
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+.DS_Store
+.env

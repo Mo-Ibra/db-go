@@ -1,0 +1,22 @@
+mod commands;
+mod state;
+
+use state::AppState;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::initial_database,
+            commands::open_database,
+            commands::close_database,
+            commands::list_tables,
+            commands::describe_table,
+            commands::load_page,
+            commands::count_rows,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running DBGo");
+}

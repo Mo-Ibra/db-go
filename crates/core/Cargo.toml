@@ -1,0 +1,12 @@
+[package]
+name = "db-go-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite engine and schema introspection for DBGo"
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+base64.workspace = true

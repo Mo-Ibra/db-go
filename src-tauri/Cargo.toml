@@ -1,0 +1,22 @@
+[package]
+name = "db-go"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DBGo — a fast, local-first SQL workbench"
+
+[lib]
+name = "db_go_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde.workspace = true
+db-go-core = { path = "../crates/core" }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
