@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use db_go_core::{
-    ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec, Page, QueryResult,
-    SchemaGraph, SortSpec, TableDesign, TableInfo,
+    ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec, JsonObject, Page,
+    QueryResult, RowUpdate, SchemaGraph, SortSpec, TableDesign, TableInfo, WriteResult,
 };
 use tauri::State;
 
@@ -213,6 +213,33 @@ pub async fn load_table_page(
         database
             .table_page(&table, filter.as_ref(), sort.as_ref(), offset, limit)
             .map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn save_changes(
+    table: String,
+    updates: Vec<RowUpdate>,
+    inserts: Vec<JsonObject>,
+    deletes: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<WriteResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<WriteResult, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let result = database
+            .save_changes(&table, &updates, &inserts, &deletes)
+            .map_err(to_error)?;
+        eprintln!(
+            "[dbgo] saved {} change(s) session={}",
+            result.affected, result.session_id
+        );
+        Ok(result)
     })
     .await
     .map_err(to_error)?

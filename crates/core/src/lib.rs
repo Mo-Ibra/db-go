@@ -181,6 +181,12 @@ pub struct SessionSummary {
 
 pub type JsonObject = serde_json::Map<String, serde_json::Value>;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RowUpdate {
+    pub rowid: i64,
+    pub values: JsonObject,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SchemaColumn {
     pub name: String,
@@ -1010,6 +1016,134 @@ impl Database {
         })
     }
 
+    pub fn save_changes(
+        &self,
+        table: &str,
+        updates: &[RowUpdate],
+        inserts: &[JsonObject],
+        deletes: &[i64],
+    ) -> Result<WriteResult> {
+        self.ensure_table(table)?;
+        let columns = self.columns(table)?;
+        if updates.is_empty() && inserts.is_empty() && deletes.is_empty() {
+            return Ok(WriteResult {
+                session_id: new_session_id(),
+                affected: 0,
+                backup_path: None,
+            });
+        }
+
+        for update in updates {
+            validate_update_values(&update.values, &columns)?;
+        }
+        for insert in inserts {
+            validate_json_columns(insert, &columns)?;
+        }
+
+        let backup = self.backup()?;
+        self.ensure_audit_table()?;
+        let session_id = new_session_id();
+        let quoted = quote_ident(table);
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut affected = 0;
+
+        // Deletes run first so a replacement row can reuse a key freed in the
+        // same save. Updates come next to free unique values before inserts.
+        for rowid in deletes {
+            let before = fetch_row_json(&transaction, table, &columns, *rowid)?
+                .ok_or_else(|| DbError::InvalidDesign(format!("row not found: {rowid}")))?;
+            transaction.execute(&format!("DELETE FROM {quoted} WHERE rowid = ?1"), [*rowid])?;
+            record_audit(
+                &transaction,
+                &session_id,
+                table,
+                Some(*rowid),
+                "delete",
+                Some(&before),
+                None,
+            )?;
+            affected += 1;
+        }
+
+        for update in updates {
+            let before =
+                fetch_row_json(&transaction, table, &columns, update.rowid)?.ok_or_else(|| {
+                    DbError::InvalidDesign(format!("row not found: {}", update.rowid))
+                })?;
+            if update.values.is_empty() {
+                continue;
+            }
+
+            let mut set_parts = Vec::new();
+            let mut params = Vec::new();
+            for (name, value) in &update.values {
+                set_parts.push(format!("{} = ?", quote_ident(name)));
+                params.push(json_to_sql(value));
+            }
+            params.push(rusqlite::types::Value::Integer(update.rowid));
+
+            transaction.execute(
+                &format!(
+                    "UPDATE {quoted} SET {} WHERE rowid = ?",
+                    set_parts.join(", ")
+                ),
+                rusqlite::params_from_iter(params),
+            )?;
+            let after = fetch_row_json(&transaction, table, &columns, update.rowid)?;
+            record_audit(
+                &transaction,
+                &session_id,
+                table,
+                Some(update.rowid),
+                "update",
+                Some(&before),
+                after.as_ref(),
+            )?;
+            affected += 1;
+        }
+
+        for row in inserts {
+            let keys: Vec<&String> = row.keys().collect();
+            if keys.is_empty() {
+                return Err(DbError::InvalidDesign(
+                    "insert row has no columns".to_string(),
+                ));
+            }
+            let column_sql = keys
+                .iter()
+                .map(|key| quote_ident(key.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let placeholders = vec!["?"; keys.len()].join(", ");
+            let sql = format!("INSERT INTO {quoted} ({column_sql}) VALUES ({placeholders})");
+            let params = keys
+                .iter()
+                .map(|key| json_to_sql(row.get(key.as_str()).expect("row key exists")))
+                .collect::<Vec<_>>();
+
+            transaction.execute(&sql, rusqlite::params_from_iter(params))?;
+            let rowid = transaction.last_insert_rowid();
+            let after = fetch_row_json(&transaction, table, &columns, rowid)?;
+            record_audit(
+                &transaction,
+                &session_id,
+                table,
+                Some(rowid),
+                "insert",
+                None,
+                after.as_ref(),
+            )?;
+            affected += 1;
+        }
+
+        transaction.commit()?;
+        Ok(WriteResult {
+            session_id,
+            affected,
+            backup_path: Some(backup.display().to_string()),
+        })
+    }
+
     pub fn query(&self, sql: &str, limit: u32) -> Result<QueryResult> {
         let limit = limit.clamp(1, 10_000) as usize;
         let mut stmt = self.conn.prepare(sql)?;
@@ -1489,6 +1623,13 @@ dbgo delete . companies \
 - Updating primary key columns is not supported.
 - Every write creates a timestamped backup and an audit row.
 
+## GUI edits
+
+The desktop app stages row edits and writes them only when the user clicks
+**Save changes**. Each save creates one backup and one audit session. The app
+does not reload the current page while edits are staged, so an agent can write
+safely and the user decides when to reload.
+
 ## Create tables
 
 Write a JSON design file, for example `table.json`:
@@ -1677,6 +1818,21 @@ fn validate_json_column(name: &str, columns: &[ColumnInfo]) -> Result<()> {
 fn validate_json_columns(row: &JsonObject, columns: &[ColumnInfo]) -> Result<()> {
     for name in row.keys() {
         validate_json_column(name, columns)?;
+    }
+    Ok(())
+}
+
+fn validate_update_values(values: &JsonObject, columns: &[ColumnInfo]) -> Result<()> {
+    for name in values.keys() {
+        validate_json_column(name, columns)?;
+        if columns
+            .iter()
+            .any(|column| column.name == *name && column.primary_key)
+        {
+            return Err(DbError::InvalidDesign(
+                "updating primary key columns is not supported".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2393,6 +2549,168 @@ mod tests {
             &json_row(&[("id", serde_json::json!(2))]),
         );
         assert!(matches!(result, Err(DbError::InvalidDesign(_))));
+    }
+
+    #[test]
+    fn saves_batch_of_updates_inserts_and_deletes_in_one_session() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[
+                json_row(&[
+                    ("id", serde_json::json!(1)),
+                    ("domain", serde_json::json!("acme.test")),
+                    ("city", serde_json::json!("Berlin")),
+                ]),
+                json_row(&[
+                    ("id", serde_json::json!(2)),
+                    ("domain", serde_json::json!("globex.test")),
+                    ("city", serde_json::json!("Austin")),
+                ]),
+            ],
+        )
+        .unwrap();
+
+        let rowids = |db: &Database| -> Vec<i64> {
+            db.query("SELECT rowid FROM companies ORDER BY id", 10)
+                .unwrap()
+                .rows
+                .iter()
+                .map(|row| match row.cells[0] {
+                    CellValue::Integer { value } => value,
+                    ref other => panic!("expected integer rowid, got {other:?}"),
+                })
+                .collect()
+        };
+        let ids = rowids(&db);
+
+        let result = db
+            .save_changes(
+                "companies",
+                &[RowUpdate {
+                    rowid: ids[0],
+                    values: json_row(&[("city", serde_json::json!("Munich"))]),
+                }],
+                &[json_row(&[
+                    ("id", serde_json::json!(3)),
+                    ("domain", serde_json::json!("initech.test")),
+                    ("city", serde_json::json!("Tokyo")),
+                ])],
+                &[ids[1]],
+            )
+            .unwrap();
+
+        assert_eq!(result.affected, 3);
+        assert!(result.backup_path.is_some());
+        assert_eq!(db.count_rows("companies", 100).unwrap().count, 2);
+        assert_eq!(city_of(&db, "acme.test"), "Munich");
+        assert_eq!(city_of(&db, "initech.test"), "Tokyo");
+
+        let sessions = db.sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+        let saved = sessions
+            .iter()
+            .find(|session| session.session_id == result.session_id)
+            .expect("saved session is listed");
+        assert_eq!(saved.actions, 3);
+    }
+
+    #[test]
+    fn save_changes_can_replace_a_deleted_key_in_one_batch() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+                ("city", serde_json::json!("Berlin")),
+            ])],
+        )
+        .unwrap();
+        let rowid = match db.query("SELECT rowid FROM companies", 10).unwrap().rows[0].cells[0] {
+            CellValue::Integer { value } => value,
+            ref other => panic!("expected integer rowid, got {other:?}"),
+        };
+
+        db.save_changes(
+            "companies",
+            &[],
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme-new.test")),
+                ("city", serde_json::json!("Paris")),
+            ])],
+            &[rowid],
+        )
+        .unwrap();
+
+        assert_eq!(db.count_rows("companies", 100).unwrap().count, 1);
+        assert_eq!(city_of(&db, "acme-new.test"), "Paris");
+    }
+
+    #[test]
+    fn save_changes_rejects_primary_key_updates() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+            ])],
+        )
+        .unwrap();
+        let rowid = match db.query("SELECT rowid FROM companies", 10).unwrap().rows[0].cells[0] {
+            CellValue::Integer { value } => value,
+            ref other => panic!("expected integer rowid, got {other:?}"),
+        };
+
+        let result = db.save_changes(
+            "companies",
+            &[RowUpdate {
+                rowid,
+                values: json_row(&[("id", serde_json::json!(2))]),
+            }],
+            &[],
+            &[],
+        );
+        assert!(matches!(result, Err(DbError::InvalidDesign(_))));
+    }
+
+    #[test]
+    fn save_changes_rolls_back_the_whole_batch() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+                ("city", serde_json::json!("Berlin")),
+            ])],
+        )
+        .unwrap();
+        let ids = db
+            .query("SELECT rowid FROM companies", 10)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| match row.cells[0] {
+                CellValue::Integer { value } => value,
+                ref other => panic!("expected integer rowid, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        let result = db.save_changes(
+            "companies",
+            &[RowUpdate {
+                rowid: ids[0],
+                values: json_row(&[("city", serde_json::json!("Paris"))]),
+            }],
+            &[],
+            &[999_999],
+        );
+
+        assert!(result.is_err());
+        assert_eq!(city_of(&db, "acme.test"), "Berlin");
     }
 
     #[test]

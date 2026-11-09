@@ -8,6 +8,9 @@ type RowDetailProps = {
   row: Row;
   index: number;
   onClose: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
+  pending?: boolean;
 };
 
 function formatBytes(bytes: number): string {
@@ -57,7 +60,15 @@ function csvValue(cell: CellValue): string {
   return text;
 }
 
-export function RowDetail({ columns, row, index, onClose }: RowDetailProps) {
+export function RowDetail({
+  columns,
+  row,
+  index,
+  onClose,
+  onEdit,
+  onDelete,
+  pending,
+}: RowDetailProps) {
   const [copied, setCopied] = useState<"json" | "csv" | null>(null);
 
   const copy = async (kind: "json" | "csv") => {
@@ -88,6 +99,11 @@ export function RowDetail({ columns, row, index, onClose }: RowDetailProps) {
             Row
           </span>
           <span className="font-mono text-xs text-fg">{row.rowid ?? index + 1}</span>
+          {pending && (
+            <span className="rounded-full border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-accent">
+              pending
+            </span>
+          )}
         </div>
         <button
           type="button"
@@ -117,24 +133,53 @@ export function RowDetail({ columns, row, index, onClose }: RowDetailProps) {
         </div>
       </div>
 
-      <div className="flex flex-none gap-2 border-t border-line p-3">
-        <button
-          type="button"
-          className={cn(
-            buttonClass,
-            copied === "json" && "border-accent/50 text-accent",
-          )}
-          onClick={() => void copy("json")}
-        >
-          {copied === "json" ? "Copied" : "Copy JSON"}
-        </button>
-        <button
-          type="button"
-          className={cn(buttonClass, copied === "csv" && "border-accent/50 text-accent")}
-          onClick={() => void copy("csv")}
-        >
-          {copied === "csv" ? "Copied" : "Copy CSV"}
-        </button>
+      <div className="flex flex-none flex-col gap-2 border-t border-line p-3">
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className={cn(
+              buttonClass,
+              copied === "json" && "border-accent/50 text-accent",
+            )}
+            onClick={() => void copy("json")}
+          >
+            {copied === "json" ? "Copied" : "Copy JSON"}
+          </button>
+          <button
+            type="button"
+            className={cn(buttonClass, copied === "csv" && "border-accent/50 text-accent")}
+            onClick={() => void copy("csv")}
+          >
+            {copied === "csv" ? "Copied" : "Copy CSV"}
+          </button>
+        </div>
+        {(onEdit || onDelete) && (
+          <div className="flex gap-2">
+            {onEdit && (
+              <button
+                type="button"
+                data-testid="edit-row"
+                className={cn(buttonClass, "border-accent/40 text-accent hover:bg-accent/10")}
+                onClick={onEdit}
+              >
+                Edit row
+              </button>
+            )}
+            {onDelete && (
+              <button
+                type="button"
+                data-testid="delete-row"
+                className={cn(
+                  buttonClass,
+                  "border-danger/35 text-[#fca5a5] hover:border-danger/60 hover:bg-danger/10",
+                )}
+                onClick={onDelete}
+              >
+                Delete row
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </aside>
   );

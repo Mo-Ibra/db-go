@@ -20,6 +20,8 @@ export type CellValue =
 export type Row = {
   rowid: number | null;
   cells: CellValue[];
+  /** Client-side identity for a row that has not been saved yet. */
+  pendingKey?: string;
 };
 
 export type Page = {
@@ -70,6 +72,19 @@ export type Relationship = {
 export type SchemaGraph = {
   tables: SchemaTable[];
   relationships: Relationship[];
+};
+
+export type JsonObject = Record<string, unknown>;
+
+export type RowUpdate = {
+  rowid: number;
+  values: JsonObject;
+};
+
+export type WriteResult = {
+  session_id: string;
+  affected: number;
+  backup_path: string | null;
 };
 
 export type SortDirection = "asc" | "desc";

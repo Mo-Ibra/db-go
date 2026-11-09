@@ -29,6 +29,7 @@ What's here so far:
 - Query history and read-only query results in the same grid
 - Click-to-sort columns, server-side filtering, and a row detail panel
 - Interactive ERD diagram: foreign-key edges, auto-layout, search, drag positions
+- GUI data editing with staged changes and one explicit **Save changes**
 - CLI writes: insert, upsert, update, delete, with automatic backups and audit
 - Live refresh when the CLI changes the open database
 - `dbgo` CLI with human, JSON, and JSONL output, plus `dbgo init`
@@ -163,8 +164,24 @@ Existing projects can refresh their agent guide with:
 dbgo agent-guide .
 ```
 
-The GUI SQL editor is read-only. Data writes are available through the CLI
-today; GUI data editing is the next milestone.
+## Editing data in the app
+
+Row edits are **staged**, not written cell by cell. The grid highlights pending
+rows and the **Save changes** bar shows how many rows are new, edited, or
+deleted.
+
+- **+ Row** opens the row editor and adds a pending insert.
+- The row detail panel has **Edit row** and **Delete row** actions.
+- **Save changes** commits every staged change in one transaction, with one
+  timestamped backup and one audit session.
+- **Discard** throws away all staged changes without touching the database.
+- Navigation is blocked while changes are pending: switching tables, filtering,
+  sorting, paging, refreshing, opening another database, and creating a table
+  wait until you save or discard.
+- If the CLI writes while edits are staged, DBGo keeps your changes and shows a
+  notice. Saving or discarding then reloads the fresh data.
+
+The GUI SQL editor remains read-only. Use the CLI for arbitrary SQL writes.
 
 Without installing:
 
@@ -177,13 +194,15 @@ cargo run -p db-go-cli -- tables ./samples/companies.db
 Open a database, select a table, and switch to the **SQL** tab. The editor is
 prefilled with a `SELECT`, and `Ctrl/Cmd+Enter` runs the current statement.
 Results appear in the same virtualized grid. The GUI SQL editor is **read-only**;
-data writes are available through the CLI today.
+use the staging grid or the CLI for writes.
 
 ## Sort, filter, inspect
 
 - Click a column header to cycle ascending → descending → unsorted.
 - Use the filter bar for `contains`, comparisons, or null checks.
-- Click any row to open the detail panel and copy it as JSON or CSV.
+- Click any row to open the detail panel, copy it as JSON or CSV, or edit/delete
+  it as a pending change.
+- Pending rows carry an accent edge until you **Save changes** or **Discard**.
 
 ## Diagram
 
@@ -229,7 +248,6 @@ src/             React UI (Vite)
 
 ## Next
 
-- GUI data editing with explicit save + audit
 - Postgres and MySQL drivers
 - D1 export and deploy
 

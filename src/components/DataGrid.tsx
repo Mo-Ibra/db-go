@@ -48,6 +48,7 @@ type DataGridProps = {
   onSort?: (column: string) => void;
   onRowClick?: (row: Row, index: number) => void;
   selectedIndex?: number | null;
+  dirtyRowIds?: ReadonlySet<number>;
 };
 
 export function DataGrid({
@@ -57,6 +58,7 @@ export function DataGrid({
   onSort,
   onRowClick,
   selectedIndex,
+  dirtyRowIds,
 }: DataGridProps) {
   const headerRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -144,11 +146,18 @@ export function DataGrid({
             {virtualizer.getVirtualItems().map((item) => {
               const row = rows[item.index];
               const selected = selectedIndex === item.index;
+              const dirty =
+                row.pendingKey !== undefined ||
+                (row.rowid !== null && dirtyRowIds?.has(row.rowid));
               return (
                 <div
                   className={cn(
                     "flex border-b border-line/60",
-                    selected ? "bg-accent/10" : "hover:bg-accent/5",
+                    dirty
+                      ? "bg-accent/[0.07] shadow-[inset_2px_0_0_#2dd4bf]"
+                      : selected
+                        ? "bg-accent/10"
+                        : "hover:bg-accent/5",
                     onRowClick && "cursor-pointer",
                   )}
                   data-row={item.index}

@@ -1,15 +1,18 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { api } from "./lib/api";
 import type {
+  CellValue,
   ColumnInfo,
   CountResult,
   DbInfo,
   FilterOp,
   FilterSpec,
+  JsonObject,
   Page,
   QueryResult,
   Row,
+  RowUpdate,
   SchemaGraph,
   SchemaMap,
   SortSpec,
@@ -17,6 +20,7 @@ import type {
 } from "./types";
 import { DataGrid } from "./components/DataGrid";
 import { RowDetail } from "./components/RowDetail";
+import { RowEditor } from "./components/RowEditor";
 import { TableDesigner } from "./components/TableDesigner";
 import { cn } from "./lib/cn";
 
@@ -52,6 +56,7 @@ const BTN_SM = `${BTN_BASE} h-7 px-2.5 text-[11.5px]`;
 const BTN_PRIMARY_COLOR =
   "border-[#14b8a6] bg-linear-to-b from-accent to-[#14b8a6] font-bold text-[#03110f] hover:brightness-110";
 const BTN_PRIMARY = `${BTN} ${BTN_PRIMARY_COLOR}`;
+const BTN_SM_PRIMARY = `${BTN_SM} ${BTN_PRIMARY_COLOR}`;
 const BTN_LARGE_PRIMARY = `${BTN_LARGE} ${BTN_PRIMARY_COLOR}`;
 const BTN_LARGE_NEUTRAL = `${BTN_LARGE} border-line-strong bg-panel-2 text-fg hover:border-[#3a4a5a] hover:bg-panel-3`;
 const BTN_GHOST = `${BTN} border-transparent bg-transparent text-fg hover:border-line-strong hover:bg-panel-2`;
@@ -62,6 +67,92 @@ const BADGE_SUBTLE =
   "rounded-full border border-line/70 bg-transparent px-1.5 py-0.5 text-[10.5px] text-muted tabular-nums";
 const SELECT =
   "h-7 rounded-md border border-line bg-panel-2 px-1.5 text-xs text-fg outline-none focus:border-accent";
+
+type PendingInsert = {
+  key: string;
+  values: JsonObject;
+};
+
+type PendingUpdate = {
+  rowid: number;
+  values: JsonObject;
+  before: JsonObject;
+};
+
+type RowEditorState =
+  | { mode: "insert"; row: Row | null }
+  | { mode: "update"; row: Row };
+
+function makePendingKey(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function isBlobColumn(column: ColumnInfo): boolean {
+  return column.type_name.toUpperCase().includes("BLOB");
+}
+
+function cellToValue(cell: CellValue | undefined): unknown {
+  if (!cell) return null;
+  switch (cell.kind) {
+    case "null":
+      return null;
+    case "integer":
+    case "real":
+    case "text":
+      return cell.value;
+    case "blob":
+      return null;
+  }
+}
+
+function valueToCell(value: unknown): CellValue {
+  if (value === null || value === undefined) return { kind: "null" };
+  if (typeof value === "number") {
+    return Number.isInteger(value)
+      ? { kind: "integer", value }
+      : { kind: "real", value };
+  }
+  if (typeof value === "boolean") {
+    return { kind: "integer", value: value ? 1 : 0 };
+  }
+  return { kind: "text", value: String(value) };
+}
+
+function rowToValues(columns: ColumnInfo[], row: Row): JsonObject {
+  const values: JsonObject = {};
+  columns.forEach((column, index) => {
+    if (isBlobColumn(column)) return;
+    values[column.name] = cellToValue(row.cells[index]);
+  });
+  return values;
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function applyValuesToRow(columns: ColumnInfo[], row: Row, values: JsonObject): Row {
+  return {
+    ...row,
+    cells: columns.map((column, index) => {
+      if (column.primary_key || isBlobColumn(column) || !(column.name in values)) {
+        return row.cells[index];
+      }
+      return valueToCell(values[column.name]);
+    }),
+  };
+}
+
+function pendingInsertToRow(columns: ColumnInfo[], insert: PendingInsert): Row {
+  return {
+    rowid: null,
+    pendingKey: insert.key,
+    cells: columns.map((column) => valueToCell(insert.values[column.name])),
+  };
+}
 
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
@@ -122,9 +213,56 @@ export default function App() {
     value: string;
   }>({ column: "", op: "contains", value: "" });
   const [selectedRow, setSelectedRow] = useState<{ row: Row; index: number } | null>(null);
+  const [pendingInserts, setPendingInserts] = useState<PendingInsert[]>([]);
+  const [pendingUpdates, setPendingUpdates] = useState<PendingUpdate[]>([]);
+  const [pendingDeletes, setPendingDeletes] = useState<number[]>([]);
+  const [rowEditor, setRowEditor] = useState<RowEditorState | null>(null);
+  const [saving, setSaving] = useState(false);
   const requestId = useRef(0);
   const bootstrapped = useRef(false);
   const lastDataVersion = useRef<number | null>(null);
+  const externalChangePending = useRef(false);
+
+  const hasPending =
+    pendingInserts.length + pendingUpdates.length + pendingDeletes.length > 0;
+
+  const pendingRowIds = useMemo(
+    () => new Set(pendingUpdates.map((update) => update.rowid)),
+    [pendingUpdates],
+  );
+
+  const displayRows = useMemo(() => {
+    if (!page) return [];
+    const updates = new Map(pendingUpdates.map((update) => [update.rowid, update.values]));
+    const deleted = new Set(pendingDeletes);
+    const rows = page.rows
+      .filter((row) => row.rowid === null || !deleted.has(row.rowid))
+      .map((row) => {
+        if (row.rowid === null) return row;
+        const values = updates.get(row.rowid);
+        return values ? applyValuesToRow(columns, row, values) : row;
+      });
+    return [...rows, ...pendingInserts.map((insert) => pendingInsertToRow(columns, insert))];
+  }, [page, columns, pendingUpdates, pendingDeletes, pendingInserts]);
+
+  const guardPending = useCallback((): boolean => {
+    if (saving) {
+      setNotice("A save is in progress. Wait for it to finish.");
+      return true;
+    }
+    if (!hasPending) return false;
+    setNotice("Save or discard your pending changes first.");
+    return true;
+  }, [hasPending, saving]);
+
+  const discardChanges = useCallback(() => {
+    setPendingInserts([]);
+    setPendingUpdates([]);
+    setPendingDeletes([]);
+    setRowEditor(null);
+    setSelectedRow(null);
+    setNotice("Discarded unsaved changes.");
+  }, []);
 
   const pagedMode = sort !== null || dataFilter !== null;
 
@@ -245,6 +383,12 @@ export default function App() {
     setDataFilter(null);
     setFilterDraft({ column: "", op: "contains", value: "" });
     setSelectedRow(null);
+    setPendingInserts([]);
+    setPendingUpdates([]);
+    setPendingDeletes([]);
+    setRowEditor(null);
+    setSaving(false);
+    externalChangePending.current = false;
     setNotice(null);
     setShowDesigner(false);
   }, []);
@@ -278,6 +422,7 @@ export default function App() {
   );
 
   const createNewDatabase = useCallback(async () => {
+    if (guardPending()) return;
     try {
       const path = await open({
         directory: true,
@@ -315,7 +460,7 @@ export default function App() {
     } catch (cause) {
       setError(String(cause));
     }
-  }, [applyDbInfo]);
+  }, [applyDbInfo, guardPending]);
 
   const handleTableCreated = useCallback(
     async (table: string) => {
@@ -345,6 +490,7 @@ export default function App() {
   );
 
   const openDb = useCallback(async () => {
+    if (guardPending()) return;
     try {
       const path = await open({
         multiple: false,
@@ -358,11 +504,12 @@ export default function App() {
     } catch (cause) {
       setError(String(cause));
     }
-  }, [openPath]);
+  }, [openPath, guardPending]);
 
   const selectTable = useCallback(
     (table: string) => {
       if (table === selected) return;
+      if (guardPending()) return;
       setView("data");
       setSort(null);
       setDataFilter(null);
@@ -376,12 +523,13 @@ export default function App() {
       setHistoryIndex(0);
       void loadTable(table, null);
     },
-    [loadTable, selected],
+    [loadTable, selected, guardPending],
   );
 
   const toggleSort = useCallback(
     (column: string) => {
       if (!selected) return;
+      if (guardPending()) return;
       const nextSort: SortSpec | null =
         sort?.column === column
           ? sort.direction === "asc"
@@ -402,11 +550,12 @@ export default function App() {
         void loadTable(selected, null);
       }
     },
-    [selected, sort, dataFilter, loadOffsetPage, loadTable],
+    [selected, sort, dataFilter, loadOffsetPage, loadTable, guardPending],
   );
 
   const applyFilter = useCallback(() => {
     if (!selected || !filterDraft.column) return;
+    if (guardPending()) return;
     const nextFilter: FilterSpec = {
       column: filterDraft.column,
       op: filterDraft.op,
@@ -417,10 +566,11 @@ export default function App() {
     setSelectedRow(null);
     setPage(null);
     void loadOffsetPage(selected, 0, sort, nextFilter);
-  }, [selected, filterDraft, sort, loadOffsetPage]);
+  }, [selected, filterDraft, sort, loadOffsetPage, guardPending]);
 
   const clearFilter = useCallback(() => {
     if (!selected) return;
+    if (guardPending()) return;
     setDataFilter(null);
     setPageIndex(0);
     setSelectedRow(null);
@@ -432,7 +582,7 @@ export default function App() {
       setHistoryIndex(0);
       void loadTable(selected, null);
     }
-  }, [selected, sort, loadOffsetPage, loadTable]);
+  }, [selected, sort, loadOffsetPage, loadTable, guardPending]);
 
   const runQuery = useCallback(
     async (text: string) => {
@@ -469,6 +619,7 @@ export default function App() {
 
   const nextPage = useCallback(async () => {
     if (!selected || !page) return;
+    if (guardPending()) return;
     if (pagedMode) {
       if (!page.has_more) return;
       await loadOffsetPage(selected, pageIndex + 1, sort, dataFilter);
@@ -493,10 +644,12 @@ export default function App() {
     loadTable,
     history,
     historyIndex,
+    guardPending,
   ]);
 
   const prevPage = useCallback(async () => {
     if (!selected) return;
+    if (guardPending()) return;
     if (pagedMode) {
       if (pageIndex <= 0) return;
       await loadOffsetPage(selected, pageIndex - 1, sort, dataFilter);
@@ -516,9 +669,11 @@ export default function App() {
     history,
     historyIndex,
     loadTable,
+    guardPending,
   ]);
 
   const refresh = useCallback(() => {
+    if (guardPending()) return;
     if (view === "diagram") {
       void api
         .schemaGraph()
@@ -549,6 +704,7 @@ export default function App() {
     loadTable,
     history,
     historyIndex,
+    guardPending,
   ]);
 
   const switchView = useCallback(
@@ -570,6 +726,7 @@ export default function App() {
 
   const changePageSize = useCallback(
     (size: number) => {
+      if (guardPending()) return;
       setPageSize(size);
       setPage(null);
       setCount(null);
@@ -584,8 +741,165 @@ export default function App() {
         void loadTable(selected, null, size);
       }
     },
-    [selected, pagedMode, sort, dataFilter, loadOffsetPage, loadTable],
+    [selected, pagedMode, sort, dataFilter, loadOffsetPage, loadTable, guardPending],
   );
+
+  const requestDesigner = useCallback(() => {
+    if (guardPending()) return;
+    setShowDesigner(true);
+  }, [guardPending]);
+
+  const saveChanges = useCallback(async () => {
+    if (!selected || !hasPending || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const updates: RowUpdate[] = pendingUpdates.map((update) => ({
+        rowid: update.rowid,
+        values: update.values,
+      }));
+      const inserts = pendingInserts.map((insert) => insert.values);
+      const result = await api.saveChanges(selected, updates, inserts, pendingDeletes);
+
+      setPendingInserts([]);
+      setPendingUpdates([]);
+      setPendingDeletes([]);
+      setRowEditor(null);
+      setSelectedRow(null);
+
+      const parts = [
+        `Saved ${result.affected} change${result.affected === 1 ? "" : "s"}`,
+        `session ${result.session_id}`,
+      ];
+      if (result.backup_path) parts.push(`backup ${result.backup_path}`);
+      setNotice(parts.join(" · "));
+
+      // The save changed data_version; record it so the poll doesn't reload again.
+      try {
+        lastDataVersion.current = await api.dataVersion();
+      } catch {
+        // The explicit reload below still refreshes the view.
+      }
+      externalChangePending.current = false;
+
+      if (pagedMode) {
+        await loadOffsetPage(selected, pageIndex, sort, dataFilter);
+      } else {
+        await loadTable(selected, history[historyIndex]);
+      }
+      void api.countRows(selected).then(setCount).catch(() => {});
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setSaving(false);
+    }
+  }, [
+    selected,
+    hasPending,
+    saving,
+    pendingUpdates,
+    pendingInserts,
+    pendingDeletes,
+    pagedMode,
+    pageIndex,
+    sort,
+    dataFilter,
+    history,
+    historyIndex,
+    loadOffsetPage,
+    loadTable,
+  ]);
+
+  const submitRowEditor = useCallback(
+    (values: JsonObject) => {
+      const editor = rowEditor;
+      if (!editor) return;
+
+      if (editor.mode === "insert") {
+        const pendingKey = editor.row?.pendingKey;
+        if (pendingKey) {
+          setPendingInserts((current) =>
+            current.map((insert) =>
+              insert.key === pendingKey ? { ...insert, values } : insert,
+            ),
+          );
+        } else {
+          setPendingInserts((current) => [
+            ...current,
+            { key: makePendingKey(), values },
+          ]);
+        }
+        setRowEditor(null);
+        return;
+      }
+
+      const row = editor.row;
+      if (row.pendingKey) {
+        setPendingInserts((current) =>
+          current.map((insert) =>
+            insert.key === row.pendingKey ? { ...insert, values } : insert,
+          ),
+        );
+      } else if (row.rowid !== null) {
+        const rowid = row.rowid;
+        setPendingUpdates((current) => {
+          const existing = current.find((update) => update.rowid === rowid);
+          const before = existing?.before ?? rowToValues(columns, row);
+          // Keep only columns the user actually changed, so a later save
+          // cannot overwrite unrelated edits made by another process.
+          const changed: JsonObject = {};
+          for (const [name, value] of Object.entries(values)) {
+            if (!valuesEqual(value, before[name])) changed[name] = value;
+          }
+          if (Object.keys(changed).length === 0) {
+            return current.filter((update) => update.rowid !== rowid);
+          }
+          if (existing) {
+            return current.map((update) =>
+              update.rowid === rowid ? { ...update, values: changed } : update,
+            );
+          }
+          return [...current, { rowid, values: changed, before }];
+        });
+      }
+      setRowEditor(null);
+    },
+    [rowEditor, columns],
+  );
+
+  const editSelectedRow = useCallback(() => {
+    const row = selectedRow?.row;
+    if (!row) return;
+    setRowEditor({ mode: row.pendingKey ? "insert" : "update", row });
+  }, [selectedRow]);
+
+  const deleteSelectedRow = useCallback(() => {
+    const row = selectedRow?.row;
+    if (!row) return;
+    if (row.pendingKey) {
+      setPendingInserts((current) =>
+        current.filter((insert) => insert.key !== row.pendingKey),
+      );
+    } else if (row.rowid !== null) {
+      const rowid = row.rowid;
+      setPendingUpdates((current) =>
+        current.filter((update) => update.rowid !== rowid),
+      );
+      setPendingDeletes((current) =>
+        current.includes(rowid) ? current : [...current, rowid],
+      );
+    }
+    setSelectedRow(null);
+  }, [selectedRow]);
+
+  useEffect(() => {
+    setSelectedRow((current) => {
+      if (!current || view !== "data") return current;
+      const next = displayRows[current.index];
+      if (!next) return null;
+      return next === current.row ? current : { row: next, index: current.index };
+    });
+  }, [displayRows, view]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -618,7 +932,7 @@ export default function App() {
     let cancelled = false;
     const timer = window.setInterval(() => {
       void (async () => {
-        if (cancelled || loading || queryRunning) return;
+        if (cancelled || loading || queryRunning || saving) return;
         try {
           const version = await api.dataVersion();
           if (cancelled) return;
@@ -627,6 +941,20 @@ export default function App() {
             return;
           }
           if (version === lastDataVersion.current) return;
+
+          if (hasPending) {
+            // Keep staged edits and let the user decide; the next poll after
+            // saving or discarding will pick up the external change.
+            if (!externalChangePending.current) {
+              externalChangePending.current = true;
+              setNotice(
+                "Another process changed the database. Your unsaved changes are kept; save or discard them to reload.",
+              );
+            }
+            return;
+          }
+
+          externalChangePending.current = false;
           lastDataVersion.current = version;
 
           const [nextTables, nextSchema, nextGraph] = await Promise.all([
@@ -681,6 +1009,8 @@ export default function App() {
     historyIndex,
     loading,
     queryRunning,
+    saving,
+    hasPending,
     loadTable,
     loadOffsetPage,
   ]);
@@ -744,9 +1074,9 @@ export default function App() {
               <button
                 type="button"
                 className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-transparent text-base leading-none text-muted hover:border-line-strong hover:bg-panel-2 hover:text-fg disabled:cursor-default disabled:opacity-40"
-                onClick={() => setShowDesigner(true)}
-                disabled={!db}
-                title="New table"
+                onClick={requestDesigner}
+                disabled={!db || hasPending}
+                title={hasPending ? "Save or discard pending changes first" : "New table"}
                 aria-label="New table"
               >
                 +
@@ -827,6 +1157,47 @@ export default function App() {
             </div>
           )}
 
+          {db && hasPending && (
+            <div
+              data-testid="pending-bar"
+              className="flex flex-none items-center justify-between gap-3 border-b border-accent/30 bg-accent/[0.08] px-3.5 py-2"
+            >
+              <div className="flex min-w-0 items-center gap-2.5">
+                <span className="h-1.5 w-1.5 flex-none rounded-full bg-accent shadow-[0_0_8px_rgba(45,212,191,0.7)]" />
+                <span className="whitespace-nowrap font-mono text-[11.5px] font-semibold text-[#b8fff4]">
+                  {pendingInserts.length + pendingUpdates.length + pendingDeletes.length} unsaved
+                  change
+                  {pendingInserts.length + pendingUpdates.length + pendingDeletes.length === 1
+                    ? ""
+                    : "s"}
+                  {selected ? ` on ${selected}` : ""}
+                </span>
+                <span className="hidden whitespace-nowrap text-[10.5px] text-muted sm:inline">
+                  {pendingInserts.length} new · {pendingUpdates.length} edited ·{" "}
+                  {pendingDeletes.length} deleted
+                </span>
+              </div>
+              <div className="flex flex-none items-center gap-2">
+                <button
+                  className={BTN_SM_GHOST}
+                  onClick={discardChanges}
+                  disabled={saving}
+                  data-testid="discard-changes"
+                >
+                  Discard
+                </button>
+                <button
+                  className={BTN_SM_PRIMARY}
+                  onClick={() => void saveChanges()}
+                  disabled={saving}
+                  data-testid="save-changes"
+                >
+                  {saving ? "Saving..." : "Save changes"}
+                </button>
+              </div>
+            </div>
+          )}
+
           {!db ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-2.5 p-10 text-center">
               <div className="grid h-[54px] w-[54px] place-items-center rounded-[14px] bg-linear-to-br from-accent to-accent-2 text-base font-extrabold tracking-tight text-[#04110f] shadow-[0_14px_40px_rgba(45,212,191,0.25)]">
@@ -861,7 +1232,7 @@ export default function App() {
                 </p>
                 <button
                   className={BTN_LARGE_PRIMARY}
-                  onClick={() => setShowDesigner(true)}
+                  onClick={requestDesigner}
                 >
                   Create your first table
                 </button>
@@ -953,6 +1324,15 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   {view === "data" ? (
                     <>
+                      <button
+                        className={BTN_SM_PRIMARY}
+                        onClick={() => setRowEditor({ mode: "insert", row: null })}
+                        disabled={columns.length === 0}
+                        data-testid="add-row"
+                        title="Add a row as a pending change"
+                      >
+                        + Row
+                      </button>
                       <label className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted">
                         Rows
                         <select
@@ -1156,10 +1536,11 @@ export default function App() {
                         graph={schemaGraph}
                         dbPath={db?.path ?? ""}
                         onOpenTable={(table) => {
+                          if (guardPending()) return;
                           setView("data");
                           void loadTable(table, null);
                         }}
-                        onCreateTable={() => setShowDesigner(true)}
+                        onCreateTable={requestDesigner}
                       />
                     </Suspense>
                   )}
@@ -1175,11 +1556,14 @@ export default function App() {
                       ) : (
                         <DataGrid
                           columns={columns}
-                          rows={page?.rows ?? []}
+                          rows={displayRows}
                           sort={sort}
                           onSort={toggleSort}
-                          onRowClick={(row, index) => setSelectedRow({ row, index })}
+                          onRowClick={(_, index) =>
+                            setSelectedRow({ row: displayRows[index], index })
+                          }
                           selectedIndex={selectedRow?.index ?? null}
+                          dirtyRowIds={pendingRowIds}
                         />
                       )
                     ) : queryRunning ? (
@@ -1205,6 +1589,26 @@ export default function App() {
                       row={selectedRow.row}
                       index={selectedRow.index}
                       onClose={() => setSelectedRow(null)}
+                      pending={
+                        view === "data" &&
+                        (selectedRow.row.pendingKey !== undefined ||
+                          (selectedRow.row.rowid !== null &&
+                            pendingRowIds.has(selectedRow.row.rowid)))
+                      }
+                      onEdit={
+                        view === "data" &&
+                        (selectedRow.row.pendingKey !== undefined ||
+                          selectedRow.row.rowid !== null)
+                          ? editSelectedRow
+                          : undefined
+                      }
+                      onDelete={
+                        view === "data" &&
+                        (selectedRow.row.pendingKey !== undefined ||
+                          selectedRow.row.rowid !== null)
+                          ? deleteSelectedRow
+                          : undefined
+                      }
                     />
                   )}
                 </div>
@@ -1242,6 +1646,15 @@ export default function App() {
           </footer>
         </main>
       </div>
+
+      <RowEditor
+        open={rowEditor !== null}
+        mode={rowEditor?.mode ?? "insert"}
+        columns={columns}
+        initial={rowEditor?.row ?? null}
+        onClose={() => setRowEditor(null)}
+        onSubmit={submitRowEditor}
+      />
 
       <TableDesigner
         open={showDesigner}

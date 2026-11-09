@@ -4,13 +4,16 @@ import type {
   CountResult,
   DbInfo,
   FilterSpec,
+  JsonObject,
   Page,
   QueryResult,
+  RowUpdate,
   SchemaGraph,
   SchemaMap,
   SortSpec,
   TableDesign,
   TableInfo,
+  WriteResult,
 } from "../types";
 
 export const api = {
@@ -21,6 +24,12 @@ export const api = {
   createProject: (path: string, overwrite: boolean) =>
     invoke<DbInfo>("create_project", { path, overwrite }),
   createTable: (design: TableDesign) => invoke<TableInfo>("create_table", { design }),
+  saveChanges: (
+    table: string,
+    updates: RowUpdate[],
+    inserts: JsonObject[],
+    deletes: number[],
+  ) => invoke<WriteResult>("save_changes", { table, updates, inserts, deletes }),
   closeDatabase: () => invoke<void>("close_database"),
   listTables: () => invoke<TableInfo[]>("list_tables"),
   describeTable: (table: string) => invoke<ColumnInfo[]>("describe_table", { table }),

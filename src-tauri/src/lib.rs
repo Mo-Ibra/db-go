@@ -14,6 +14,7 @@ pub fn run() {
             commands::create_database,
             commands::create_project,
             commands::create_table,
+            commands::save_changes,
             commands::close_database,
             commands::list_tables,
             commands::describe_table,
