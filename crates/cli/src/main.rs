@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use db_go_core::{
-    AlterTableOp, CellValue, ColumnDesign, ColumnInfo, CountResult, Database, Direction,
-    FilterSpec, IndexInfo, JsonObject, MigrateResult, MigrationInfo, Page, QueryResult,
-    SchemaChange, SchemaGraph, SessionSummary, TableDesign, TableInfo, ViewInfo, WriteResult,
+    AlterTableOp, BackupInfo, CellValue, ColumnDesign, ColumnInfo, CountResult, Database,
+    Direction, FilterSpec, IndexInfo, JsonObject, MigrateResult, MigrationInfo, Page, QueryResult,
+    RestoreResult, SchemaChange, SchemaGraph, SessionSummary, TableDesign, TableInfo, ViewInfo,
+    WriteResult,
 };
 use serde::Serialize;
 
@@ -92,6 +93,22 @@ enum Command {
 
     /// Back up the database.
     Backup { db: PathBuf },
+
+    /// List timestamped backups.
+    Backups { db: PathBuf },
+
+    /// Restore a backup. A safety backup of the current database is created first.
+    Restore {
+        db: PathBuf,
+        /// Backup path or filename, as shown by `dbgo backups`.
+        #[arg(long, conflicts_with = "latest")]
+        backup: Option<String>,
+        /// Restore the newest backup.
+        #[arg(long, conflicts_with = "backup")]
+        latest: bool,
+        #[arg(long)]
+        yes: bool,
+    },
 
     /// Insert rows from a JSONL file.
     Insert {
@@ -403,6 +420,35 @@ fn run(cli: Cli) -> Result<(), String> {
             let backup = database.backup().map_err(err)?;
             println!("{}", backup.display());
             Ok(())
+        }
+        Command::Backups { db } => {
+            let database = open(&db)?;
+            let backups = database.backups().map_err(err)?;
+            output_backups(&backups, cli.json, cli.jsonl)
+        }
+        Command::Restore {
+            db,
+            backup,
+            latest,
+            yes,
+        } => {
+            if !yes {
+                return Err("refusing to restore without --yes".to_string());
+            }
+            let mut database = open(&db)?;
+            let backup = if latest {
+                database
+                    .backups()
+                    .map_err(err)?
+                    .into_iter()
+                    .next()
+                    .map(|info| info.path)
+                    .ok_or_else(|| "no backups found".to_string())?
+            } else {
+                backup.ok_or_else(|| "restore needs --backup <path> or --latest".to_string())?
+            };
+            let result = database.restore_backup(&backup).map_err(err)?;
+            output_restore(&result, cli.json, cli.jsonl)
         }
         Command::Insert { db, table, file } => {
             let rows = read_jsonl(&file)?;
@@ -788,6 +834,73 @@ fn output_write(result: &WriteResult, json: bool, jsonl: bool) -> Result<(), Str
         result.session_id,
         result.backup_path.as_deref().unwrap_or("-")
     ))
+}
+
+fn output_backups(backups: &[BackupInfo], json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(backups);
+    }
+    if jsonl {
+        return write_jsonl(backups);
+    }
+
+    let mut table = human_table();
+    table.set_header(vec!["name", "size", "modified", "path"]);
+    for backup in backups {
+        table.add_row(vec![
+            backup.name.clone(),
+            format_bytes(backup.size_bytes),
+            format_age(backup.modified_ms),
+            backup.path.clone(),
+        ]);
+    }
+    print_table(table)
+}
+
+fn output_restore(result: &RestoreResult, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(result);
+    }
+    if jsonl {
+        return write_jsonl(std::slice::from_ref(result));
+    }
+    print_line(&format!("restored from {}", result.restored_from))?;
+    if let Some(safety) = &result.safety_backup {
+        print_line(&format!("safety backup {safety}"))?;
+    }
+    print_line(&format!(
+        "session {} · {} table(s)",
+        result.session_id, result.tables
+    ))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn format_age(modified_ms: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(modified_ms);
+    let seconds = ((now - modified_ms).max(0) / 1000) as u64;
+    match seconds {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        3600..=86_399 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
 }
 
 fn output_sessions(sessions: &[SessionSummary], json: bool, jsonl: bool) -> Result<(), String> {

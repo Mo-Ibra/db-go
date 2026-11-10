@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { api } from "./lib/api";
 import type {
+  BackupInfo,
   CellValue,
   ColumnInfo,
   CountResult,
@@ -27,6 +28,7 @@ import { RowEditor } from "./components/RowEditor";
 import { StructureView } from "./components/StructureView";
 import { AlterTableDialog } from "./components/AlterTableDialog";
 import { MigrationsDialog } from "./components/MigrationsDialog";
+import { BackupsDialog } from "./components/BackupsDialog";
 import { TableDesigner } from "./components/TableDesigner";
 import { cn } from "./lib/cn";
 
@@ -232,6 +234,11 @@ export default function App() {
   const [migrationsLoading, setMigrationsLoading] = useState(false);
   const [migrationsApplying, setMigrationsApplying] = useState(false);
   const [migrationsError, setMigrationsError] = useState<string | null>(null);
+  const [showBackups, setShowBackups] = useState(false);
+  const [backups, setBackups] = useState<BackupInfo[]>([]);
+  const [backupsLoading, setBackupsLoading] = useState(false);
+  const [backupsError, setBackupsError] = useState<string | null>(null);
+  const [restoringBackup, setRestoringBackup] = useState<string | null>(null);
   const requestId = useRef(0);
   const detailsRequestId = useRef(0);
   const bootstrapped = useRef(false);
@@ -261,14 +268,18 @@ export default function App() {
   }, [page, columns, pendingUpdates, pendingDeletes, pendingInserts]);
 
   const guardPending = useCallback((): boolean => {
-    if (saving) {
-      setNotice("A save is in progress. Wait for it to finish.");
+    if (saving || restoringBackup !== null) {
+      setNotice(
+        restoringBackup !== null
+          ? "A restore is in progress. Wait for it to finish."
+          : "A save is in progress. Wait for it to finish.",
+      );
       return true;
     }
     if (!hasPending) return false;
     setNotice("Save or discard your pending changes first.");
     return true;
-  }, [hasPending, saving]);
+  }, [hasPending, saving, restoringBackup]);
 
   const discardChanges = useCallback(() => {
     setPendingInserts([]);
@@ -407,6 +418,18 @@ export default function App() {
     }
   }, []);
 
+  const loadBackups = useCallback(async () => {
+    setBackupsLoading(true);
+    setBackupsError(null);
+    try {
+      setBackups(await api.listBackups());
+    } catch (cause) {
+      setBackupsError(String(cause));
+    } finally {
+      setBackupsLoading(false);
+    }
+  }, []);
+
   const applyDbInfo = useCallback((info: DbInfo) => {
     setDb(info);
     setTables(info.tables);
@@ -443,6 +466,11 @@ export default function App() {
     setMigrationsError(null);
     setMigrationsApplying(false);
     setMigrationsLoading(false);
+    setShowBackups(false);
+    setBackups([]);
+    setBackupsError(null);
+    setBackupsLoading(false);
+    setRestoringBackup(null);
     setNotice(null);
     setShowDesigner(false);
   }, []);
@@ -950,6 +978,47 @@ export default function App() {
     }
   }, [guardPending, loadMigrations, refreshAfterSchemaChange, selected]);
 
+  const openBackups = useCallback(() => {
+    if (guardPending()) return;
+    setShowBackups(true);
+    void loadBackups();
+  }, [guardPending, loadBackups]);
+
+  const handleRestoreBackup = useCallback(
+    async (backup: BackupInfo) => {
+      if (guardPending()) return;
+      const confirmed = await confirm(
+        `Restore ${backup.name}? The current database is saved as a safety backup first. Changes made after this snapshot will be lost.`,
+        { title: "Restore backup?", kind: "warning" },
+      );
+      if (!confirmed) return;
+
+      setRestoringBackup(backup.path);
+      setBackupsError(null);
+      try {
+        const result = await api.restoreBackup(backup.path);
+        await loadBackups();
+        const safety = result.safety_backup
+          ? ` · safety backup ${result.safety_backup}`
+          : "";
+        await refreshAfterSchemaChange(
+          selected,
+          `Restored ${backup.name} · ${result.tables} table(s)${safety}`,
+        );
+      } catch (cause) {
+        setBackupsError(String(cause));
+        try {
+          setBackups(await api.listBackups());
+        } catch {
+          // Keep the original error visible.
+        }
+      } finally {
+        setRestoringBackup(null);
+      }
+    },
+    [guardPending, loadBackups, refreshAfterSchemaChange, selected],
+  );
+
   const saveChanges = useCallback(async () => {
     if (!selected || !hasPending || saving) return;
     setSaving(true);
@@ -1133,7 +1202,7 @@ export default function App() {
     let cancelled = false;
     const timer = window.setInterval(() => {
       void (async () => {
-        if (cancelled || loading || queryRunning || saving) return;
+        if (cancelled || loading || queryRunning || saving || restoringBackup !== null) return;
         try {
           const version = await api.dataVersion();
           if (cancelled) return;
@@ -1224,6 +1293,7 @@ export default function App() {
     loading,
     queryRunning,
     saving,
+    restoringBackup,
     hasPending,
     loadTable,
     loadOffsetPage,
@@ -1279,6 +1349,16 @@ export default function App() {
               title="List and apply migrations"
             >
               Migrations
+            </button>
+          )}
+          {db && (
+            <button
+              className={BTN_GHOST}
+              onClick={openBackups}
+              disabled={loading || queryRunning || saving || restoringBackup !== null}
+              title="Browse and restore backups"
+            >
+              Backups
             </button>
           )}
           <button className={BTN_GHOST} onClick={() => void createNewDatabase()}>
@@ -1944,6 +2024,17 @@ export default function App() {
         onClose={() => setShowMigrations(false)}
         onRefresh={() => void loadMigrations()}
         onApply={() => void handleApplyMigrations()}
+      />
+
+      <BackupsDialog
+        open={showBackups}
+        backups={backups}
+        loading={backupsLoading}
+        error={backupsError}
+        restoring={restoringBackup}
+        onClose={() => setShowBackups(false)}
+        onRefresh={() => void loadBackups()}
+        onRestore={(backup) => void handleRestoreBackup(backup)}
       />
 
       <TableDesigner

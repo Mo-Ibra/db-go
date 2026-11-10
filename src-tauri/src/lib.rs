@@ -21,6 +21,8 @@ pub fn run() {
             commands::drop_index,
             commands::list_migrations,
             commands::apply_migrations,
+            commands::list_backups,
+            commands::restore_backup,
             commands::save_changes,
             commands::close_database,
             commands::list_tables,

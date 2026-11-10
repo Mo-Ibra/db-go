@@ -191,6 +191,20 @@ export type MigrateResult = {
   applied: AppliedMigration[];
 };
 
+export type BackupInfo = {
+  name: string;
+  path: string;
+  size_bytes: number;
+  modified_ms: number;
+};
+
+export type RestoreResult = {
+  restored_from: string;
+  safety_backup: string | null;
+  session_id: string;
+  tables: number;
+};
+
 export type DbInfo = {
   path: string;
   tables: TableInfo[];

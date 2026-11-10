@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use db_go_core::{
-    AlterTableOp, ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec, JsonObject,
-    MigrateResult, MigrationInfo, Page, QueryResult, RowUpdate, SchemaChange, SchemaGraph,
-    SortSpec, TableDesign, TableDetails, TableInfo, WriteResult,
+    AlterTableOp, BackupInfo, ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec,
+    JsonObject, MigrateResult, MigrationInfo, Page, QueryResult, RestoreResult, RowUpdate,
+    SchemaChange, SchemaGraph, SortSpec, TableDesign, TableDetails, TableInfo, WriteResult,
 };
 use tauri::State;
 
@@ -351,6 +351,42 @@ pub async fn apply_migrations(state: State<'_, AppState>) -> Result<MigrateResul
             .ok_or_else(|| "no database open".to_string())?;
         let result = database.apply_migrations().map_err(to_error)?;
         eprintln!("[dbgo] applied {} migration(s)", result.applied.len());
+        Ok(result)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn list_backups(state: State<'_, AppState>) -> Result<Vec<BackupInfo>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<BackupInfo>, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        database.backups().map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn restore_backup(
+    backup: String,
+    state: State<'_, AppState>,
+) -> Result<RestoreResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<RestoreResult, String> {
+        let mut guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_mut()
+            .ok_or_else(|| "no database open".to_string())?;
+        let result = database.restore_backup(&backup).map_err(to_error)?;
+        eprintln!(
+            "[dbgo] restored {} tables={} session={}",
+            result.restored_from, result.tables, result.session_id
+        );
         Ok(result)
     })
     .await

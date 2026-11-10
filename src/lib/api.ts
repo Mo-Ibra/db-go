@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AlterTableOp,
+  BackupInfo,
   ColumnInfo,
   CountResult,
   DbInfo,
@@ -10,6 +11,7 @@ import type {
   MigrateResult,
   Page,
   QueryResult,
+  RestoreResult,
   RowUpdate,
   SchemaChange,
   SchemaGraph,
@@ -39,6 +41,8 @@ export const api = {
   dropIndex: (name: string) => invoke<SchemaChange>("drop_index", { name }),
   listMigrations: () => invoke<MigrationInfo[]>("list_migrations"),
   applyMigrations: () => invoke<MigrateResult>("apply_migrations"),
+  listBackups: () => invoke<BackupInfo[]>("list_backups"),
+  restoreBackup: (backup: string) => invoke<RestoreResult>("restore_backup", { backup }),
   saveChanges: (
     table: string,
     updates: RowUpdate[],

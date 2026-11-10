@@ -224,6 +224,22 @@ pub struct MigrateResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BackupInfo {
+    pub name: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub modified_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RestoreResult {
+    pub restored_from: String,
+    pub safety_backup: Option<String>,
+    pub session_id: String,
+    pub tables: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DbInfo {
     pub path: String,
     pub tables: Vec<TableInfo>,
@@ -371,6 +387,182 @@ impl Database {
         } else {
             backup_database(&self.path)
         }
+    }
+
+    fn backup_directory(&self) -> Option<PathBuf> {
+        if let Some(project_dir) = &self.project_dir {
+            return Some(project_dir.join("backups"));
+        }
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        Some(if parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            parent.to_path_buf()
+        })
+    }
+
+    fn backup_prefix(&self) -> String {
+        format!(
+            "{}.bak-",
+            self.path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("db.sqlite")
+        )
+    }
+
+    pub fn backups(&self) -> Result<Vec<BackupInfo>> {
+        let Some(directory) = self.backup_directory() else {
+            return Ok(Vec::new());
+        };
+        if !directory.is_dir() {
+            return Ok(Vec::new());
+        }
+        let prefix = self.backup_prefix();
+        let mut backups = Vec::new();
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            let name = name.to_string();
+            let metadata = entry.metadata()?;
+            let modified_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as i64)
+                .unwrap_or(0);
+            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+            backups.push(BackupInfo {
+                name,
+                path: canonical.display().to_string(),
+                size_bytes: metadata.len(),
+                modified_ms,
+            });
+        }
+        backups.sort_by(|left, right| {
+            right
+                .modified_ms
+                .cmp(&left.modified_ms)
+                .then_with(|| right.name.cmp(&left.name))
+        });
+        Ok(backups)
+    }
+
+    fn resolve_backup(&self, backup: &str) -> Result<PathBuf> {
+        let directory = self.backup_directory().ok_or_else(|| {
+            DbError::InvalidDesign("database has no backup directory".to_string())
+        })?;
+        let raw = PathBuf::from(backup);
+        let candidate = if raw.is_absolute() {
+            raw
+        } else {
+            let mut candidates = vec![directory.join(&raw)];
+            if let Ok(current) = std::env::current_dir() {
+                candidates.push(current.join(&raw));
+            }
+            if let Some(project_dir) = &self.project_dir {
+                candidates.push(project_dir.join(&raw));
+            }
+            candidates
+                .into_iter()
+                .find(|candidate| candidate.exists())
+                .ok_or_else(|| {
+                    DbError::InvalidDesign(format!("backup not found: {}", raw.display()))
+                })?
+        };
+
+        let candidate = candidate.canonicalize().map_err(|_| {
+            DbError::InvalidDesign(format!("backup not found: {}", candidate.display()))
+        })?;
+        let allowed = directory.canonicalize().map_err(|_| {
+            DbError::InvalidDesign(format!(
+                "backup directory not found: {}",
+                directory.display()
+            ))
+        })?;
+        if !candidate.starts_with(&allowed) {
+            return Err(DbError::InvalidDesign(format!(
+                "backup must be inside {}",
+                allowed.display()
+            )));
+        }
+        if let Ok(live) = self.path.canonicalize() {
+            if live == candidate {
+                return Err(DbError::InvalidDesign(
+                    "cannot restore the live database over itself".to_string(),
+                ));
+            }
+        }
+        let name = candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !name.starts_with(&self.backup_prefix()) {
+            return Err(DbError::InvalidDesign(format!(
+                "not a DBGo backup for this database: {name}"
+            )));
+        }
+        Ok(candidate)
+    }
+
+    pub fn restore_backup(&mut self, backup: &str) -> Result<RestoreResult> {
+        let source = self.resolve_backup(backup)?;
+        {
+            let check = Connection::open(&source)?;
+            let integrity: String = check.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                return Err(DbError::InvalidDesign(format!(
+                    "backup failed quick_check: {integrity}"
+                )));
+            }
+        }
+
+        let safety = self.backup()?;
+        self.conn.restore(
+            rusqlite::MAIN_DB,
+            &source,
+            None::<fn(rusqlite::backup::Progress)>,
+        )?;
+        self.conn
+            .execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
+
+        self.ensure_audit_table()?;
+        let session_id = new_session_id();
+        let before = serde_json::json!({ "database": self.path.display().to_string() });
+        let after = serde_json::json!({
+            "restored_from": source.display().to_string(),
+            "safety_backup": safety.display().to_string(),
+        });
+        record_audit(
+            &self.conn,
+            &session_id,
+            "backups",
+            None,
+            "restore",
+            Some(&before),
+            Some(&after),
+        )?;
+
+        if let Err(error) = self.write_schema_md() {
+            eprintln!("[dbgo] warning: could not update schema.md: {error}");
+        }
+        let tables = self.tables()?.len();
+
+        Ok(RestoreResult {
+            restored_from: source.display().to_string(),
+            safety_backup: Some(safety.display().to_string()),
+            session_id,
+            tables,
+        })
     }
 
     fn write_schema_md(&self) -> Result<()> {
@@ -2574,6 +2766,10 @@ audit session. Do not edit a migration that is already recorded as applied.
 
 - Every write creates a timestamped snapshot in `backups/`.
 - `dbgo backup .` creates one explicitly.
+- `dbgo backups .` lists snapshots, newest first.
+- `dbgo restore . --latest --yes` restores the newest snapshot.
+- `dbgo restore . --backup <path> --yes` restores one specific snapshot.
+- A restore validates the snapshot and creates a safety backup first.
 - `dbgo sessions .` lists recent write sessions and their action counts.
 
 ## Rules
@@ -2584,6 +2780,7 @@ audit session. Do not edit a migration that is already recorded as applied.
 - Run commands from this folder and use `.` as the database path.
 - Use `--yes` for update/delete.
 - Use `--yes` when dropping columns, indexes, or views.
+- Use `--yes` when restoring a backup.
 - Prefer `upsert` with a natural key over blind inserts.
 - Do not update primary key columns.
 - Do not edit a migration that is already applied; add a new numbered file instead.
@@ -3868,6 +4065,61 @@ mod tests {
             .find(|migration| migration.name == "0001_create_legacy")
             .expect("legacy file is listed");
         assert!(file.applied);
+    }
+
+    #[test]
+    fn lists_backups_and_restores_with_a_safety_backup() {
+        let (_dir, mut db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+                ("city", serde_json::json!("Berlin")),
+            ])],
+        )
+        .unwrap();
+        let backup = db.backup().unwrap();
+
+        db.update_rows(
+            "companies",
+            &FilterSpec {
+                column: "domain".into(),
+                op: FilterOp::Eq,
+                value: Some("acme.test".into()),
+            },
+            &json_row(&[("city", serde_json::json!("Paris"))]),
+        )
+        .unwrap();
+        assert_eq!(city_of(&db, "acme.test"), "Paris");
+
+        let listed = db.backups().unwrap();
+        let listed_backup = listed
+            .iter()
+            .find(|info| info.path == backup.canonicalize().unwrap().display().to_string())
+            .expect("explicit backup is listed");
+        assert!(listed_backup.size_bytes > 0);
+
+        let result = db.restore_backup(&backup.display().to_string()).unwrap();
+        assert!(result.safety_backup.is_some());
+        assert_eq!(result.tables, 1);
+        assert_eq!(city_of(&db, "acme.test"), "Berlin");
+
+        let after = db.backups().unwrap();
+        assert!(after
+            .iter()
+            .any(|info| Some(info.path.clone()) == result.safety_backup));
+        let sessions = db.sessions().unwrap();
+        assert!(sessions
+            .iter()
+            .any(|session| session.session_id == result.session_id));
+    }
+
+    #[test]
+    fn refuses_to_restore_a_file_outside_the_backup_directory() {
+        let (_dir, mut db) = temp_companies_db();
+        let result = db.restore_backup("/etc/passwd");
+        assert!(result.is_err());
     }
 
     #[test]

@@ -32,6 +32,7 @@ What's here so far:
 - Click-to-sort columns, server-side filtering, and a row detail panel
 - Interactive ERD diagram: foreign-key edges, auto-layout, search, drag positions
 - GUI data editing with staged changes and one explicit **Save changes**
+- Backup browser and safe restore with an automatic pre-restore snapshot
 - CLI writes: insert, upsert, update, delete, with automatic backups and audit
 - Live refresh when the CLI changes the open database
 - `dbgo` CLI with human, JSON, and JSONL output, plus `dbgo init`
@@ -104,6 +105,10 @@ dbgo update . companies --where '{"column":"id","op":"eq","value":1}' --set '{"c
 dbgo delete . companies --where '{"column":"id","op":"eq","value":1}' --yes
 dbgo sessions .
 dbgo backup .
+dbgo backups .
+dbgo restore . --latest --yes
+# or restore one specific snapshot:
+dbgo restore . --backup backups/db.sqlite.bak-1794310717376 --yes
 
 # machine-readable
 dbgo --json  tables ./samples/companies.db
@@ -191,6 +196,23 @@ dbgo migrate .      # apply pending files in filename order
 
 Each applied migration gets its own timestamped backup and audit session.
 Migrations should contain plain SQL statements, not `BEGIN`/`COMMIT`.
+
+### Backups and restore
+
+```bash
+dbgo backups .                              # list snapshots, newest first
+dbgo restore . --latest --yes               # restore the newest snapshot
+dbgo restore . --backup <path> --yes        # restore one snapshot
+```
+
+- The app's **Backups** dialog lists snapshots with size and timestamp.
+- A restore validates the snapshot with `PRAGMA quick_check`.
+- Before restoring, the current database is saved as a safety backup.
+- The restore itself is recorded in `_dbgo_audit`.
+- Restoring is destructive: `--yes` is required, and changes made after the
+  chosen snapshot are lost.
+- Backups live in `backups/` for project folders, next to the file for
+  single-file databases.
 
 ## Writing data
 
@@ -304,7 +326,6 @@ src/             React UI (Vite)
 
 ## Next
 
-- Backup history, restore, and undo by audit session
 - Large-database debugging: `EXPLAIN QUERY PLAN`, index usage, FK navigation, result export
 - Inline cell editing, multi-row selection, and copy/paste
 - Postgres and MySQL drivers
