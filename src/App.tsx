@@ -482,6 +482,11 @@ export default function App() {
       try {
         const info = await api.openDatabase(path);
         applyDbInfo(info);
+        if (info.agent_files_error) {
+          setNotice(`Agent files: ${info.agent_files_error}`);
+        } else if (info.agent_files?.created) {
+          setNotice(`Agent files created in ${info.agent_files.directory}`);
+        }
         void Promise.all([api.schemaMap(), api.schemaGraph()])
           .then(([nextSchema, nextGraph]) => {
             setSchema(nextSchema);

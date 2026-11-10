@@ -153,7 +153,7 @@ enum Command {
     /// List recent write sessions from the audit log.
     Sessions { db: PathBuf },
 
-    /// Refresh the project's AGENTS.md agent guide.
+    /// Create or refresh agent files beside the database.
     AgentGuide { db: PathBuf },
 
     /// List tables in a database.
@@ -505,9 +505,15 @@ fn run(cli: Cli) -> Result<(), String> {
             output_sessions(&sessions, cli.json, cli.jsonl)
         }
         Command::AgentGuide { db } => {
-            let database = open(&db)?;
-            let path = database.refresh_agent_guide().map_err(err)?;
-            println!("{}", path.display());
+            let mut database = open(&db)?;
+            let info = database.refresh_agent_guide().map_err(err)?;
+            println!(
+                "{} agent files in {}",
+                if info.created { "created" } else { "refreshed" },
+                info.directory
+            );
+            println!("agent guide: {}", info.agents_path);
+            println!("schema: {}", info.schema_path);
             Ok(())
         }
         Command::Tables { db } => {

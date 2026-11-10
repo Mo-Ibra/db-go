@@ -240,11 +240,23 @@ pub struct RestoreResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AgentFilesInfo {
+    pub directory: String,
+    pub database: String,
+    pub agents_path: String,
+    pub schema_path: String,
+    pub config_path: String,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DbInfo {
     pub path: String,
     pub tables: Vec<TableInfo>,
     pub backup_path: Option<String>,
     pub project_path: Option<String>,
+    pub agent_files: Option<AgentFilesInfo>,
+    pub agent_files_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -565,10 +577,7 @@ impl Database {
         })
     }
 
-    fn write_schema_md(&self) -> Result<()> {
-        let Some(project_dir) = &self.project_dir else {
-            return Ok(());
-        };
+    fn schema_document(&self) -> Result<String> {
         let graph = self.schema_graph()?;
         let mut markdown = schema_markdown(&graph);
 
@@ -597,9 +606,128 @@ impl Database {
             markdown.push_str(&index_lines);
             markdown.push('\n');
         }
+        Ok(markdown)
+    }
 
-        std::fs::write(project_dir.join("schema.md"), markdown)?;
+    fn write_schema_md(&self) -> Result<()> {
+        let Some(project_dir) = &self.project_dir else {
+            return Ok(());
+        };
+        let document = self.schema_document()?;
+        let path = project_dir.join("schema.md");
+        let existing = std::fs::read_to_string(&path).ok();
+        let merged = merge_marked_document(
+            existing.as_deref(),
+            &document,
+            "dbgo:schema",
+            looks_like_dbgo_schema,
+        );
+        std::fs::write(path, merged)?;
         Ok(())
+    }
+
+    pub fn ensure_agent_files(&mut self) -> Result<AgentFilesInfo> {
+        let (project_dir, config, created) = match &self.project_dir {
+            Some(project_dir) => {
+                let config = read_project_config(project_dir)?;
+                (project_dir.clone(), config, false)
+            }
+            None => {
+                let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+                let project_dir = if parent.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    parent.to_path_buf()
+                };
+                let config_path = project_dir.join("dbgo.json");
+                if config_path.exists() {
+                    let config = read_project_config(&project_dir)?;
+                    let config_database = project_dir.join(&config.database);
+                    let matches = config_database == self.path
+                        || config_database.canonicalize().ok() == self.path.canonicalize().ok();
+                    if !matches {
+                        return Err(DbError::InvalidDesign(format!(
+                            "{} already points to another database: {}",
+                            config_path.display(),
+                            config.database
+                        )));
+                    }
+                    (project_dir, config, false)
+                } else {
+                    let database = self
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("db.sqlite")
+                        .to_string();
+                    let name = project_dir
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .filter(|name| !name.is_empty())
+                        .map(ToOwned::to_owned)
+                        .or_else(|| {
+                            self.path
+                                .file_stem()
+                                .and_then(|stem| stem.to_str())
+                                .map(ToOwned::to_owned)
+                        })
+                        .unwrap_or_else(|| "database".to_string());
+                    (
+                        project_dir,
+                        ProjectConfig {
+                            name,
+                            database,
+                            version: 1,
+                            created_at: now_secs(),
+                        },
+                        true,
+                    )
+                }
+            }
+        };
+
+        std::fs::create_dir_all(project_dir.join("migrations"))?;
+        std::fs::create_dir_all(project_dir.join("backups"))?;
+        if self.table_exists("_dbgo_migrations")? {
+            self.materialize_migrations(&project_dir)?;
+        } else {
+            self.ensure_migrations_table()?;
+        }
+
+        let agents_path = project_dir.join("AGENTS.md");
+        let existing_agents = std::fs::read_to_string(&agents_path).ok();
+        let agents = merge_marked_document(
+            existing_agents.as_deref(),
+            &agents_markdown(&config),
+            "dbgo:agent-guide",
+            looks_like_dbgo_agents,
+        );
+        std::fs::write(&agents_path, agents)?;
+
+        let schema_path = project_dir.join("schema.md");
+        let existing_schema = std::fs::read_to_string(&schema_path).ok();
+        let schema = merge_marked_document(
+            existing_schema.as_deref(),
+            &self.schema_document()?,
+            "dbgo:schema",
+            looks_like_dbgo_schema,
+        );
+        std::fs::write(&schema_path, schema)?;
+
+        let config_path = project_dir.join("dbgo.json");
+        if created {
+            write_project_config(&project_dir, &config)?;
+        }
+        self.project_dir = Some(project_dir.clone());
+
+        Ok(AgentFilesInfo {
+            directory: project_dir.display().to_string(),
+            database: config.database,
+            agents_path: agents_path.display().to_string(),
+            schema_path: schema_path.display().to_string(),
+            config_path: config_path.display().to_string(),
+            created,
+        })
     }
 
     pub fn create_project(
@@ -987,16 +1115,27 @@ impl Database {
             .map_err(DbError::from)
     }
 
-    pub fn refresh_agent_guide(&self) -> Result<PathBuf> {
-        let Some(project_dir) = &self.project_dir else {
-            return Err(DbError::NotAProject(
-                "agent guide requires a project folder".to_string(),
-            ));
-        };
-        let config = read_project_config(project_dir)?;
-        let path = project_dir.join("AGENTS.md");
-        std::fs::write(&path, agents_markdown(&config))?;
-        Ok(path)
+    pub fn refresh_agent_guide(&mut self) -> Result<AgentFilesInfo> {
+        self.ensure_agent_files()
+    }
+
+    fn materialize_migrations(&self, project_dir: &Path) -> Result<()> {
+        let migrations_dir = project_dir.join("migrations");
+        std::fs::create_dir_all(&migrations_dir)?;
+        let mut statement = self
+            .conn
+            .prepare("SELECT name, sql FROM _dbgo_migrations ORDER BY id")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (name, sql) = row?;
+            let path = migrations_dir.join(format!("{}.sql", sanitize_slug(&name)));
+            if !path.exists() {
+                std::fs::write(path, format!("{sql}\n"))?;
+            }
+        }
+        Ok(())
     }
 
     pub fn sessions(&self) -> Result<Vec<SessionSummary>> {
@@ -2593,15 +2732,78 @@ fn read_project_config(project_dir: &Path) -> Result<ProjectConfig> {
         .map_err(|error| DbError::InvalidDesign(format!("invalid dbgo.json: {error}")))
 }
 
-fn write_project_files(project_dir: &Path, config: &ProjectConfig) -> Result<()> {
+fn write_project_config(project_dir: &Path, config: &ProjectConfig) -> Result<()> {
     let config_json = serde_json::to_string_pretty(config)?;
     std::fs::write(project_dir.join("dbgo.json"), config_json)?;
+    Ok(())
+}
+
+fn write_project_files(project_dir: &Path, config: &ProjectConfig) -> Result<()> {
+    write_project_config(project_dir, config)?;
     std::fs::write(project_dir.join("AGENTS.md"), agents_markdown(config))?;
     std::fs::write(
         project_dir.join("schema.md"),
         "# Schema\n\nNo tables yet.\n",
     )?;
     Ok(())
+}
+
+fn looks_like_dbgo_agents(text: &str) -> bool {
+    text.trim_start().starts_with("# Working with ")
+}
+
+fn looks_like_dbgo_schema(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("# Schema")
+        && (trimmed.contains("No tables yet.")
+            || trimmed.contains("| Column | Type | Constraints |"))
+}
+
+fn merge_marked_document(
+    existing: Option<&str>,
+    generated: &str,
+    marker: &str,
+    looks_generated: fn(&str) -> bool,
+) -> String {
+    let Some(existing) = existing else {
+        return generated.to_string();
+    };
+    if existing.trim().is_empty() {
+        return generated.to_string();
+    }
+
+    let start = format!("<!-- {marker}:start -->");
+    let end = format!("<!-- {marker}:end -->");
+    if let Some(start_index) = existing.find(&start) {
+        let section = format!("{start}\n{}\n{end}", generated.trim_end());
+        if let Some(relative_end) = existing[start_index..].find(&end) {
+            let end_index = start_index + relative_end;
+            let mut merged = String::new();
+            merged.push_str(&existing[..start_index]);
+            merged.push_str(&section);
+            merged.push_str(&existing[end_index + end.len()..]);
+            return merged;
+        }
+        let mut merged = existing[..start_index].trim_end().to_string();
+        merged.push_str("\n\n");
+        merged.push_str(&section);
+        merged.push('\n');
+        return merged;
+    }
+
+    if looks_generated(existing) {
+        return generated.to_string();
+    }
+
+    let mut merged = existing.trim_end().to_string();
+    merged.push_str("\n\n");
+    merged.push_str(&start);
+    merged.push('\n');
+    merged.push_str(generated.trim_end());
+    merged.push('\n');
+    merged.push_str(&end);
+    merged.push('\n');
+    merged
 }
 
 fn agents_markdown(config: &ProjectConfig) -> String {
@@ -4120,6 +4322,126 @@ mod tests {
         let (_dir, mut db) = temp_companies_db();
         let result = db.restore_backup("/etc/passwd");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn adopts_bare_database_with_agent_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("companies.db");
+        let (mut db, _) = Database::create(&path, false).unwrap();
+        db.create_table(&TableDesign {
+            name: "companies".into(),
+            columns: vec![
+                ColumnDesign {
+                    primary_key: true,
+                    not_null: true,
+                    ..column("id", "INTEGER")
+                },
+                ColumnDesign {
+                    not_null: true,
+                    unique: true,
+                    ..column("domain", "TEXT")
+                },
+            ],
+            index_foreign_keys: true,
+        })
+        .unwrap();
+
+        let info = db.ensure_agent_files().unwrap();
+        assert!(info.created);
+        assert_eq!(info.database, "companies.db");
+        assert_eq!(db.project_dir(), Some(dir.path()));
+
+        for name in ["dbgo.json", "AGENTS.md", "schema.md"] {
+            assert!(dir.path().join(name).is_file(), "{name} should exist");
+        }
+        assert!(dir.path().join("migrations").is_dir());
+        assert!(dir.path().join("backups").is_dir());
+
+        let agents = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(agents.contains("dbgo alter-table"));
+        assert!(agents.contains("dbgo backups"));
+        assert!(agents.contains("dbgo restore"));
+        let schema = std::fs::read_to_string(dir.path().join("schema.md")).unwrap();
+        assert!(schema.contains("## companies"));
+        let config = read_project_config(dir.path()).unwrap();
+        assert_eq!(config.database, "companies.db");
+
+        let migration_files = std::fs::read_dir(dir.path().join("migrations"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .collect::<Vec<_>>();
+        assert!(!migration_files.is_empty());
+        assert!(migration_files.iter().any(|entry| {
+            std::fs::read_to_string(entry.path())
+                .map(|sql| sql.contains("CREATE TABLE"))
+                .unwrap_or(false)
+        }));
+
+        let backup = db.backup().unwrap();
+        assert!(backup.starts_with(dir.path().join("backups")));
+    }
+
+    #[test]
+    fn adoption_preserves_existing_agent_and_schema_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "# My project\n\nCustom instructions.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("schema.md"),
+            "# My schema\n\nHand-written notes.\n",
+        )
+        .unwrap();
+        let path = dir.path().join("companies.db");
+        let (mut db, _) = Database::create(&path, false).unwrap();
+        db.create_table(&TableDesign {
+            name: "companies".into(),
+            columns: vec![ColumnDesign {
+                primary_key: true,
+                not_null: true,
+                ..column("id", "INTEGER")
+            }],
+            index_foreign_keys: true,
+        })
+        .unwrap();
+
+        db.ensure_agent_files().unwrap();
+        db.ensure_agent_files().unwrap();
+
+        let agents = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(agents.starts_with("# My project"));
+        assert!(agents.contains("Custom instructions."));
+        assert_eq!(agents.matches("<!-- dbgo:agent-guide:start -->").count(), 1);
+        assert!(agents.contains("dbgo alter-table"));
+
+        let schema = std::fs::read_to_string(dir.path().join("schema.md")).unwrap();
+        assert!(schema.starts_with("# My schema"));
+        assert!(schema.contains("Hand-written notes."));
+        assert_eq!(schema.matches("<!-- dbgo:schema:start -->").count(), 1);
+        assert!(schema.contains("## companies"));
+    }
+
+    #[test]
+    fn refuses_adoption_when_project_file_points_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        write_project_config(
+            dir.path(),
+            &ProjectConfig {
+                name: "other".into(),
+                database: "other.db".into(),
+                version: 1,
+                created_at: now_secs(),
+            },
+        )
+        .unwrap();
+        let path = dir.path().join("companies.db");
+        let (mut db, _) = Database::create(&path, false).unwrap();
+
+        assert!(db.ensure_agent_files().is_err());
+        assert!(!dir.path().join("AGENTS.md").exists());
     }
 
     #[test]

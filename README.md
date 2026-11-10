@@ -16,7 +16,7 @@ What's here so far:
 - Tauri 2 native desktop window (no browser app, no server)
 - Rust core with SQLite (WAL, memory-mapped I/O)
 - Create a database project: `db.sqlite`, `AGENTS.md`, `schema.md`, `migrations/`, `backups/`
-- Open an existing SQLite file with the native file picker
+- Open an existing SQLite file; DBGo creates agent-ready files beside it
 - Visual table designer: types, PK/NN/unique, defaults, foreign keys, FK indexes
 - Structure inspector: DDL, columns, indexes, foreign keys, and index management
 - Alter tables from the GUI or CLI: add, rename, and drop columns with SQL preview
@@ -151,6 +151,33 @@ dbgo backup .
 `query` is read-only. `page` uses keyset pagination on `rowid`. Run
 `dbgo <command> --help` for details.
 
+## Open an existing database
+
+Opening a bare SQLite file in the app converts its folder into an agent-ready
+project, including:
+
+```
+companies.db
+AGENTS.md          # CLI commands and project rules for agents
+schema.md          # generated schema snapshot
+dbgo.json          # project config pointing at companies.db
+migrations/        # existing migration records materialized as .sql files
+backups/           # future backups go here
+```
+
+- Existing `AGENTS.md` and `schema.md` files are preserved. DBGo appends a
+  marked section instead of overwriting user content.
+- Existing migration records in `_dbgo_migrations` are written to
+  `migrations/` if the files are missing.
+- Future backups go into `backups/`, and schema changes write numbered
+  migration files.
+
+The same adoption is available from the CLI:
+
+```bash
+dbgo agent-guide ./path/to/companies.db
+```
+
 ## Schema changes
 
 The **Structure** tab shows the table DDL, columns, indexes, foreign keys, and
@@ -236,10 +263,12 @@ dbgo sessions .
 The desktop app polls `PRAGMA data_version`. When the CLI changes the database,
 the open table, schema, and diagram refresh automatically.
 
-Existing projects can refresh their agent guide with:
+Existing projects, and bare databases opened with `agent-guide`, can refresh
+their agent files with:
 
 ```bash
 dbgo agent-guide .
+dbgo agent-guide ./path/to/companies.db
 ```
 
 ## Editing data in the app

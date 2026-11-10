@@ -205,9 +205,20 @@ export type RestoreResult = {
   tables: number;
 };
 
+export type AgentFilesInfo = {
+  directory: string;
+  database: string;
+  agents_path: string;
+  schema_path: string;
+  config_path: string;
+  created: boolean;
+};
+
 export type DbInfo = {
   path: string;
   tables: TableInfo[];
   backup_path?: string | null;
   project_path?: string | null;
+  agent_files?: AgentFilesInfo | null;
+  agent_files_error?: string | null;
 };

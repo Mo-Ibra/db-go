@@ -32,7 +32,14 @@ pub async fn initial_database() -> Result<Option<String>, String> {
 pub async fn open_database(path: String, state: State<'_, AppState>) -> Result<DbInfo, String> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<DbInfo, String> {
-        let database = Database::open_project(&path).map_err(to_error)?;
+        let mut database = Database::open_project(&path).map_err(to_error)?;
+        let (agent_files, agent_files_error) = match database.ensure_agent_files() {
+            Ok(info) => (Some(info), None),
+            Err(error) => {
+                eprintln!("[dbgo] warning: could not create agent files: {error}");
+                (None, Some(error.to_string()))
+            }
+        };
         let database_path = database.path().display().to_string();
         let tables = database.tables().map_err(to_error)?;
         eprintln!(
@@ -44,6 +51,8 @@ pub async fn open_database(path: String, state: State<'_, AppState>) -> Result<D
             tables,
             backup_path: None,
             project_path: database.project_dir().map(|p| p.display().to_string()),
+            agent_files,
+            agent_files_error,
         };
         *db.lock().map_err(|_| lock_error())? = Some(database);
         Ok(info)
@@ -74,6 +83,8 @@ pub async fn create_project(
             tables,
             backup_path,
             project_path,
+            agent_files: None,
+            agent_files_error: None,
         };
         *db.lock().map_err(|_| lock_error())? = Some(database);
         Ok(info)
@@ -97,6 +108,8 @@ pub async fn create_database(
             tables,
             backup_path: backup.map(|path| path.display().to_string()),
             project_path: database.project_dir().map(|p| p.display().to_string()),
+            agent_files: None,
+            agent_files_error: None,
         };
         eprintln!(
             "[dbgo] created database: {path} (backup: {})",
