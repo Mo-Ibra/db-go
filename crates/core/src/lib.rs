@@ -212,6 +212,33 @@ pub struct D1ExportResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ExecResult {
+    pub sql: String,
+    pub columns: Vec<ColumnInfo>,
+    pub rows: Vec<Row>,
+    pub truncated: bool,
+    pub affected: usize,
+    pub session_id: Option<String>,
+    pub transactional: bool,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TriggerInfo {
+    pub name: String,
+    pub table: String,
+    pub sql: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MaintenanceResult {
+    pub action: String,
+    pub session_id: Option<String>,
+    pub columns: Vec<ColumnInfo>,
+    pub rows: Vec<Row>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CountResult {
     pub count: i64,
     pub capped: bool,
@@ -249,6 +276,51 @@ pub struct FilterSpec {
     pub column: String,
     pub op: FilterOp,
     pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FilterExpr {
+    Condition {
+        column: String,
+        op: FilterOp,
+        value: Option<String>,
+    },
+    And {
+        filters: Vec<FilterExpr>,
+    },
+    Or {
+        filters: Vec<FilterExpr>,
+    },
+    Not {
+        filter: Box<FilterExpr>,
+    },
+}
+
+impl From<FilterSpec> for FilterExpr {
+    fn from(filter: FilterSpec) -> Self {
+        FilterExpr::Condition {
+            column: filter.column,
+            op: filter.op,
+            value: filter.value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum FilterInput {
+    Spec(FilterSpec),
+    Expr(FilterExpr),
+}
+
+impl FilterInput {
+    pub fn into_expr(self) -> FilterExpr {
+        match self {
+            FilterInput::Spec(spec) => spec.into(),
+            FilterInput::Expr(expr) => expr,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1480,6 +1552,15 @@ impl Database {
         filter: &FilterSpec,
         values: &JsonObject,
     ) -> Result<WriteResult> {
+        self.update_rows_expr(table, &FilterExpr::from(filter.clone()), values)
+    }
+
+    pub fn update_rows_expr(
+        &self,
+        table: &str,
+        filter: &FilterExpr,
+        values: &JsonObject,
+    ) -> Result<WriteResult> {
         self.ensure_table(table)?;
         let columns = self.columns(table)?;
         if values.is_empty() {
@@ -1504,7 +1585,8 @@ impl Database {
 
         self.ensure_audit_table()?;
         let session_id = new_session_id();
-        let (where_sql, where_params) = filter_clause(filter, &columns)?;
+        let (condition, where_params) = filter_expr_clause(filter, &columns)?;
+        let where_sql = format!(" WHERE {condition}");
         let quoted = quote_ident(table);
         let transaction = self.conn.unchecked_transaction()?;
         let matching = select_rows_json(&transaction, &quoted, &where_sql, where_params, &columns)?;
@@ -1539,11 +1621,16 @@ impl Database {
     }
 
     pub fn delete_rows(&self, table: &str, filter: &FilterSpec) -> Result<WriteResult> {
+        self.delete_rows_expr(table, &FilterExpr::from(filter.clone()))
+    }
+
+    pub fn delete_rows_expr(&self, table: &str, filter: &FilterExpr) -> Result<WriteResult> {
         self.ensure_table(table)?;
         let columns = self.columns(table)?;
         self.ensure_audit_table()?;
         let session_id = new_session_id();
-        let (where_sql, where_params) = filter_clause(filter, &columns)?;
+        let (condition, where_params) = filter_expr_clause(filter, &columns)?;
+        let where_sql = format!(" WHERE {condition}");
         let quoted = quote_ident(table);
         let transaction = self.conn.unchecked_transaction()?;
         let matching = select_rows_json(&transaction, &quoted, &where_sql, where_params, &columns)?;
@@ -2538,6 +2625,359 @@ impl Database {
             }
         }
         Ok(columns)
+    }
+
+    pub fn exec(
+        &self,
+        sql: &str,
+        allow_write: bool,
+        transactional: bool,
+        returning: bool,
+        limit: u32,
+    ) -> Result<ExecResult> {
+        let sql = sql.trim();
+        if sql.is_empty() {
+            return Err(DbError::InvalidDesign(
+                "a SQL statement is required".to_string(),
+            ));
+        }
+        let limit = limit.clamp(1, 10_000) as usize;
+
+        if !allow_write {
+            let result = self.query(sql, limit as u32)?;
+            return Ok(ExecResult {
+                sql: sql.to_string(),
+                columns: result.columns,
+                rows: result.rows,
+                truncated: result.truncated,
+                affected: 0,
+                session_id: None,
+                transactional: false,
+                read_only: true,
+            });
+        }
+
+        self.ensure_audit_table()?;
+        let session_id = new_session_id();
+        let after = serde_json::json!({
+            "sql": sql,
+            "returning": returning,
+        });
+
+        if returning {
+            let (columns, rows, truncated, affected) = if transactional {
+                let transaction = self.conn.unchecked_transaction()?;
+                let result = exec_returning(&transaction, sql, limit)?;
+                record_audit(
+                    &transaction,
+                    &session_id,
+                    "sql",
+                    None,
+                    "exec",
+                    None,
+                    Some(&after),
+                )?;
+                transaction.commit()?;
+                result
+            } else {
+                let result = exec_returning(&self.conn, sql, limit)?;
+                record_audit(
+                    &self.conn,
+                    &session_id,
+                    "sql",
+                    None,
+                    "exec",
+                    None,
+                    Some(&after),
+                )?;
+                result
+            };
+            return Ok(ExecResult {
+                sql: sql.to_string(),
+                columns,
+                rows,
+                truncated,
+                affected,
+                session_id: Some(session_id),
+                transactional,
+                read_only: false,
+            });
+        }
+
+        let affected = if transactional {
+            let transaction = self.conn.unchecked_transaction()?;
+            let before = self.conn.total_changes();
+            transaction.execute_batch(sql)?;
+            let affected = self.conn.total_changes().saturating_sub(before) as usize;
+            record_audit(
+                &transaction,
+                &session_id,
+                "sql",
+                None,
+                "exec",
+                None,
+                Some(&after),
+            )?;
+            transaction.commit()?;
+            affected
+        } else {
+            let before = self.conn.total_changes();
+            self.conn.execute_batch(sql)?;
+            let affected = self.conn.total_changes().saturating_sub(before) as usize;
+            record_audit(
+                &self.conn,
+                &session_id,
+                "sql",
+                None,
+                "exec",
+                None,
+                Some(&after),
+            )?;
+            affected
+        };
+
+        Ok(ExecResult {
+            sql: sql.to_string(),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            truncated: false,
+            affected,
+            session_id: Some(session_id),
+            transactional,
+            read_only: false,
+        })
+    }
+
+    pub fn drop_table(&self, table: &str) -> Result<SchemaChange> {
+        self.ensure_table(table)?;
+        if table.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(
+                "internal tables cannot be dropped".to_string(),
+            ));
+        }
+        let before = self.table_ddl(table)?;
+        self.run_schema_change(
+            &format!("drop_table_{table}"),
+            vec![format!("DROP TABLE {}", quote_ident(table))],
+            "drop_table",
+            table,
+            Some(serde_json::json!({ "ddl": before })),
+            None,
+        )
+    }
+
+    pub fn rename_table(&self, from: &str, to: &str) -> Result<SchemaChange> {
+        self.ensure_table(from)?;
+        validate_ident(to)?;
+        if to.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(
+                "names starting with _dbgo_ are reserved".to_string(),
+            ));
+        }
+        if self.any_object_exists(to)? {
+            return Err(DbError::InvalidDesign(format!(
+                "object already exists: {to}"
+            )));
+        }
+        let before = self.table_ddl(from)?;
+        self.run_schema_change(
+            &format!("rename_table_{from}_to_{to}"),
+            vec![format!(
+                "ALTER TABLE {} RENAME TO {}",
+                quote_ident(from),
+                quote_ident(to)
+            )],
+            "rename_table",
+            from,
+            Some(serde_json::json!({ "ddl": before })),
+            Some(serde_json::json!({ "new_name": to })),
+        )
+    }
+
+    pub fn triggers(&self, table: Option<&str>) -> Result<Vec<TriggerInfo>> {
+        let mut sql = "SELECT name, tbl_name, sql
+                       FROM sqlite_master
+                       WHERE type = 'trigger'
+                         AND sql IS NOT NULL
+                         AND name NOT LIKE 'sqlite_%'
+                         AND substr(name, 1, 6) <> '_dbgo_'"
+            .to_string();
+        if table.is_some() {
+            sql.push_str(" AND tbl_name = ?1 COLLATE NOCASE");
+        }
+        sql.push_str(" ORDER BY name");
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = if let Some(table) = table {
+            statement
+                .query_map([table], |row| {
+                    Ok(TriggerInfo {
+                        name: row.get(0)?,
+                        table: row.get(1)?,
+                        sql: row.get(2)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            statement
+                .query_map([], |row| {
+                    Ok(TriggerInfo {
+                        name: row.get(0)?,
+                        table: row.get(1)?,
+                        sql: row.get(2)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        Ok(rows)
+    }
+
+    pub fn create_trigger(&self, name: &str, sql: &str) -> Result<SchemaChange> {
+        validate_ident(name)?;
+        if name.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(format!(
+                "reserved trigger name: {name}"
+            )));
+        }
+        let exists: i64 = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE
+             )",
+            [name],
+            |row| row.get(0),
+        )?;
+        if exists != 0 {
+            return Err(DbError::InvalidDesign(format!(
+                "trigger already exists: {name}"
+            )));
+        }
+        let sql = sql.trim().trim_end_matches(';').trim();
+        if !sql.to_ascii_uppercase().starts_with("CREATE TRIGGER") {
+            return Err(DbError::InvalidDesign(
+                "trigger SQL must start with CREATE TRIGGER".to_string(),
+            ));
+        }
+        self.run_schema_change(
+            &format!("trigger_{name}"),
+            vec![sql.to_string()],
+            "create_trigger",
+            name,
+            None,
+            Some(serde_json::json!({ "ddl": sql })),
+        )
+    }
+
+    pub fn drop_trigger(&self, name: &str) -> Result<SchemaChange> {
+        validate_ident(name)?;
+        if name.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(format!(
+                "reserved trigger name: {name}"
+            )));
+        }
+        let ddl = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
+                [name],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .ok_or_else(|| DbError::InvalidDesign(format!("trigger not found: {name}")))?;
+        self.run_schema_change(
+            &format!("drop_trigger_{name}"),
+            vec![format!("DROP TRIGGER {}", quote_ident(name))],
+            "drop_trigger",
+            name,
+            Some(serde_json::json!({ "ddl": ddl })),
+            None,
+        )
+    }
+
+    pub fn vacuum(&self) -> Result<MaintenanceResult> {
+        self.conn.execute_batch("VACUUM;")?;
+        self.record_maintenance("vacuum", serde_json::json!({}), Vec::new(), Vec::new())
+    }
+
+    pub fn analyze(&self) -> Result<MaintenanceResult> {
+        self.conn.execute_batch("ANALYZE;")?;
+        self.record_maintenance("analyze", serde_json::json!({}), Vec::new(), Vec::new())
+    }
+
+    pub fn pragma(&self, pragma: &str, write: bool) -> Result<MaintenanceResult> {
+        let body = pragma.trim().trim_end_matches(';').trim();
+        let body = if body.to_ascii_lowercase().starts_with("pragma ") {
+            body[7..].trim()
+        } else {
+            body
+        };
+        if body.is_empty() {
+            return Err(DbError::InvalidDesign(
+                "a PRAGMA name is required".to_string(),
+            ));
+        }
+        let sql = format!("PRAGMA {body}");
+        let mut statement = self.conn.prepare(&sql)?;
+        let columns = statement
+            .columns()
+            .map(|column| ColumnInfo {
+                name: column.name().to_string(),
+                type_name: column.decl_type().unwrap_or("").to_string(),
+                not_null: false,
+                primary_key: false,
+            })
+            .collect::<Vec<_>>();
+        let mut rows = statement.query([])?;
+        let mut output = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut cells = Vec::with_capacity(columns.len());
+            for index in 0..columns.len() {
+                cells.push(cell_from_value_ref(row.get_ref(index)?));
+            }
+            output.push(Row { rowid: None, cells });
+        }
+        if write {
+            self.record_maintenance(
+                "pragma",
+                serde_json::json!({ "pragma": body }),
+                columns,
+                output,
+            )
+        } else {
+            Ok(MaintenanceResult {
+                action: "pragma".to_string(),
+                session_id: None,
+                columns,
+                rows: output,
+            })
+        }
+    }
+
+    fn record_maintenance(
+        &self,
+        action: &str,
+        details: serde_json::Value,
+        columns: Vec<ColumnInfo>,
+        rows: Vec<Row>,
+    ) -> Result<MaintenanceResult> {
+        self.ensure_audit_table()?;
+        let session_id = new_session_id();
+        record_audit(
+            &self.conn,
+            &session_id,
+            "maintenance",
+            None,
+            action,
+            None,
+            Some(&details),
+        )?;
+        Ok(MaintenanceResult {
+            action: action.to_string(),
+            session_id: Some(session_id),
+            columns,
+            rows,
+        })
     }
 
     pub fn count_rows(&self, table: &str, cap: i64) -> Result<CountResult> {
@@ -3772,6 +4212,65 @@ dbgo delete . companies \
 - Updating primary key columns is not supported.
 - Every write is audited. Backups are manual (`dbgo backup .`).
 
+`--where` also accepts an AND/OR/NOT expression tree:
+
+```json
+{
+  "type": "and",
+  "filters": [
+    { "type": "condition", "column": "id", "op": "gte", "value": "2" },
+    { "type": "or", "filters": [
+      { "type": "condition", "column": "city", "op": "eq", "value": "Berlin" },
+      { "type": "condition", "column": "city", "op": "eq", "value": "Paris" }
+    ] }
+  ]
+}
+```
+
+Node types: `condition`, `and`, `or`, `not`. Old single-condition JSON still
+works.
+
+## Execute arbitrary SQL
+
+`dbgo exec` is read-only unless `--write` and `--yes` are provided.
+
+```bash
+dbgo exec . "select * from companies limit 20"
+dbgo exec . "update employees set salary = salary + 1" --write --yes
+dbgo exec . --file script.sql --write --yes
+dbgo exec . "update companies set city = 'Berlin' returning id, city" \
+  --write --yes --returning
+dbgo exec . "vacuum" --write --yes --no-transaction
+```
+
+- Normal writes run in one transaction.
+- `--no-transaction` is required for VACUUM, ATTACH, write PRAGMAs, or scripts
+  with their own BEGIN/COMMIT.
+- `--returning` executes a single statement and returns rows.
+- Writes get one audit session; no automatic backup.
+- `--limit` caps returned rows.
+
+## DDL and maintenance
+
+```bash
+dbgo drop-table . legacy_companies --yes
+dbgo rename-table . companies organizations
+dbgo trigger create . audit_companies --sql "create trigger audit_companies after update on companies begin select 1; end"
+dbgo trigger create . audit_companies --file trigger.sql
+dbgo trigger list . companies
+dbgo trigger drop . audit_companies --yes
+dbgo vacuum .
+dbgo analyze .
+dbgo pragma . user_version
+dbgo pragma . user_version=3 --yes
+```
+
+- Drop table/trigger require `--yes`.
+- Schema changes write migrations and refresh `schema.md`.
+- `vacuum`, `analyze`, and write PRAGMAs are audited but do not create migrations.
+- Use `dbgo exec` for column type changes, table rebuilds, ATTACH, and other
+  arbitrary DDL.
+
 ## Export
 
 ```bash
@@ -4038,27 +4537,26 @@ fn md_escape(value: &str) -> String {
     value.replace('|', "\\|")
 }
 
-fn filter_clause(
-    filter: &FilterSpec,
+fn filter_condition_clause(
+    column_name: &str,
+    op: FilterOp,
+    value: Option<&str>,
     columns: &[ColumnInfo],
 ) -> Result<(String, Vec<rusqlite::types::Value>)> {
-    if !columns.iter().any(|column| column.name == filter.column) {
-        return Err(DbError::UnknownColumn(filter.column.clone()));
+    if !columns.iter().any(|column| column.name == column_name) {
+        return Err(DbError::UnknownColumn(column_name.to_string()));
     }
-    let column = quote_ident(&filter.column);
+    let column = quote_ident(column_name);
     let mut params = Vec::new();
 
-    let clause = match filter.op {
+    let clause = match op {
         FilterOp::Contains => {
-            let value = filter
-                .value
-                .as_deref()
-                .ok_or(DbError::MissingFilterValue(filter.op))?;
+            let value = value.ok_or(DbError::MissingFilterValue(op))?;
             params.push(rusqlite::types::Value::Text(format!(
                 "%{}%",
                 escape_like(value)
             )));
-            format!(" WHERE CAST({column} AS TEXT) LIKE ? ESCAPE '\\'")
+            format!("CAST({column} AS TEXT) LIKE ? ESCAPE '\\'")
         }
         FilterOp::Eq
         | FilterOp::Neq
@@ -4066,7 +4564,7 @@ fn filter_clause(
         | FilterOp::Gte
         | FilterOp::Lt
         | FilterOp::Lte => {
-            let operator = match filter.op {
+            let operator = match op {
                 FilterOp::Eq => "=",
                 FilterOp::Neq => "<>",
                 FilterOp::Gt => ">",
@@ -4075,18 +4573,60 @@ fn filter_clause(
                 FilterOp::Lte => "<=",
                 _ => unreachable!(),
             };
-            let value = filter
-                .value
-                .as_deref()
-                .ok_or(DbError::MissingFilterValue(filter.op))?;
+            let value = value.ok_or(DbError::MissingFilterValue(op))?;
             params.push(rusqlite::types::Value::Text(value.to_string()));
-            format!(" WHERE {column} {operator} ?")
+            format!("{column} {operator} ?")
         }
-        FilterOp::IsNull => format!(" WHERE {column} IS NULL"),
-        FilterOp::NotNull => format!(" WHERE {column} IS NOT NULL"),
+        FilterOp::IsNull => format!("{column} IS NULL"),
+        FilterOp::NotNull => format!("{column} IS NOT NULL"),
     };
 
     Ok((clause, params))
+}
+
+fn filter_clause(
+    filter: &FilterSpec,
+    columns: &[ColumnInfo],
+) -> Result<(String, Vec<rusqlite::types::Value>)> {
+    let (clause, params) =
+        filter_condition_clause(&filter.column, filter.op, filter.value.as_deref(), columns)?;
+    Ok((format!(" WHERE {clause}"), params))
+}
+
+fn filter_expr_clause(
+    filter: &FilterExpr,
+    columns: &[ColumnInfo],
+) -> Result<(String, Vec<rusqlite::types::Value>)> {
+    match filter {
+        FilterExpr::Condition { column, op, value } => {
+            let (clause, params) = filter_condition_clause(column, *op, value.as_deref(), columns)?;
+            Ok((format!("({clause})"), params))
+        }
+        FilterExpr::And { filters } | FilterExpr::Or { filters } => {
+            if filters.is_empty() {
+                return Err(DbError::InvalidDesign(
+                    "AND/OR filters need at least one condition".to_string(),
+                ));
+            }
+            let joiner = if matches!(filter, FilterExpr::And { .. }) {
+                " AND "
+            } else {
+                " OR "
+            };
+            let mut clauses = Vec::with_capacity(filters.len());
+            let mut params = Vec::new();
+            for child in filters {
+                let (clause, child_params) = filter_expr_clause(child, columns)?;
+                clauses.push(clause);
+                params.extend(child_params);
+            }
+            Ok((format!("({})", clauses.join(joiner)), params))
+        }
+        FilterExpr::Not { filter } => {
+            let (clause, params) = filter_expr_clause(filter, columns)?;
+            Ok((format!("NOT {clause}"), params))
+        }
+    }
 }
 
 fn validate_json_column(name: &str, columns: &[ColumnInfo]) -> Result<()> {
@@ -4903,6 +5443,47 @@ fn d1_sql_literal(value: ValueRef<'_>) -> String {
         }
         ValueRef::Blob(blob) => format!("X'{}'", hex_encode(blob)),
     }
+}
+
+fn exec_returning(
+    connection: &Connection,
+    sql: &str,
+    limit: usize,
+) -> Result<(Vec<ColumnInfo>, Vec<Row>, bool, usize)> {
+    let mut statement = connection.prepare(sql)?;
+    let columns = statement
+        .columns()
+        .map(|column| ColumnInfo {
+            name: column.name().to_string(),
+            type_name: column.decl_type().unwrap_or("").to_string(),
+            not_null: false,
+            primary_key: false,
+        })
+        .collect::<Vec<_>>();
+
+    let before = connection.total_changes();
+    if columns.is_empty() {
+        connection.execute_batch(sql)?;
+        let affected = connection.total_changes().saturating_sub(before) as usize;
+        return Ok((Vec::new(), Vec::new(), false, affected));
+    }
+
+    let mut rows = statement.query([])?;
+    let mut output = Vec::new();
+    let mut truncated = false;
+    while let Some(row) = rows.next()? {
+        if output.len() < limit {
+            let mut cells = Vec::with_capacity(columns.len());
+            for index in 0..columns.len() {
+                cells.push(cell_from_value_ref(row.get_ref(index)?));
+            }
+            output.push(Row { rowid: None, cells });
+        } else {
+            truncated = true;
+        }
+    }
+    let affected = connection.total_changes().saturating_sub(before) as usize;
+    Ok((columns, output, truncated, affected))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -6574,6 +7155,195 @@ mod tests {
         db.export_d1(output.path(), None, true).unwrap();
         assert!(output.path().join("schema.sql").is_file());
         assert!(output.path().join("keep.txt").is_file());
+    }
+
+    #[test]
+    fn exec_runs_reads_writes_returning_and_maintenance() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[
+                json_row(&[
+                    ("id", serde_json::json!(1)),
+                    ("domain", serde_json::json!("acme.test")),
+                    ("city", serde_json::json!("Berlin")),
+                ]),
+                json_row(&[
+                    ("id", serde_json::json!(2)),
+                    ("domain", serde_json::json!("globex.test")),
+                    ("city", serde_json::json!("Austin")),
+                ]),
+            ],
+        )
+        .unwrap();
+
+        let read = db
+            .exec(
+                "SELECT city FROM companies ORDER BY id",
+                false,
+                true,
+                false,
+                10,
+            )
+            .unwrap();
+        assert!(read.read_only);
+        assert_eq!(read.rows.len(), 2);
+        assert!(read.session_id.is_none());
+
+        assert!(matches!(
+            db.exec("DELETE FROM companies", false, true, false, 10),
+            Err(DbError::ReadOnly)
+        ));
+
+        let update = db
+            .exec(
+                "UPDATE companies SET city = 'Paris' WHERE id = 1",
+                true,
+                true,
+                false,
+                10,
+            )
+            .unwrap();
+        assert_eq!(update.affected, 1);
+        assert!(update.session_id.is_some());
+        assert_eq!(city_of(&db, "acme.test"), "Paris");
+
+        let returning = db
+            .exec(
+                "UPDATE companies SET city = 'Rome' WHERE id = 1 RETURNING id, city",
+                true,
+                true,
+                true,
+                10,
+            )
+            .unwrap();
+        assert_eq!(returning.columns.len(), 2);
+        assert_eq!(returning.rows.len(), 1);
+        assert_eq!(returning.affected, 1);
+
+        let multi = db
+            .exec(
+                "UPDATE companies SET city = city WHERE id = 1; UPDATE companies SET city = city WHERE id = 2;",
+                true,
+                true,
+                false,
+                10,
+            )
+            .unwrap();
+        assert_eq!(multi.affected, 2);
+
+        assert!(db.exec("VACUUM", true, true, false, 10).is_err());
+        db.exec("VACUUM", true, false, false, 10).unwrap();
+    }
+
+    #[test]
+    fn filters_support_and_or_not_expressions() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[
+                json_row(&[
+                    ("id", serde_json::json!(1)),
+                    ("domain", serde_json::json!("acme.test")),
+                    ("city", serde_json::json!("Berlin")),
+                ]),
+                json_row(&[
+                    ("id", serde_json::json!(2)),
+                    ("domain", serde_json::json!("globex.test")),
+                    ("city", serde_json::json!("Austin")),
+                ]),
+                json_row(&[
+                    ("id", serde_json::json!(3)),
+                    ("domain", serde_json::json!("initech.test")),
+                    ("city", serde_json::json!("Paris")),
+                ]),
+            ],
+        )
+        .unwrap();
+
+        let filter = FilterExpr::And {
+            filters: vec![
+                FilterExpr::Condition {
+                    column: "id".into(),
+                    op: FilterOp::Gte,
+                    value: Some("2".into()),
+                },
+                FilterExpr::Or {
+                    filters: vec![
+                        FilterExpr::Condition {
+                            column: "city".into(),
+                            op: FilterOp::Eq,
+                            value: Some("Berlin".into()),
+                        },
+                        FilterExpr::Condition {
+                            column: "city".into(),
+                            op: FilterOp::Eq,
+                            value: Some("Paris".into()),
+                        },
+                    ],
+                },
+            ],
+        };
+        let result = db
+            .update_rows_expr(
+                "companies",
+                &filter,
+                &json_row(&[("city", serde_json::json!("Matched"))]),
+            )
+            .unwrap();
+        assert_eq!(result.affected, 1);
+        assert_eq!(city_of(&db, "initech.test"), "Matched");
+        assert_eq!(city_of(&db, "globex.test"), "Austin");
+
+        let filter = FilterExpr::Not {
+            filter: Box::new(FilterExpr::Condition {
+                column: "id".into(),
+                op: FilterOp::Eq,
+                value: Some("3".into()),
+            }),
+        };
+        let result = db.delete_rows_expr("companies", &filter).unwrap();
+        assert_eq!(result.affected, 2);
+        assert_eq!(db.count_rows("companies", 10).unwrap().count, 1);
+    }
+
+    #[test]
+    fn drops_renames_and_manages_triggers() {
+        let (_dir, db) = temp_companies_db();
+        let trigger = db
+            .create_trigger(
+                "companies_touch",
+                "CREATE TRIGGER companies_touch AFTER UPDATE ON companies
+                 BEGIN UPDATE companies SET city = city WHERE id = NEW.id; END",
+            )
+            .unwrap();
+        assert!(trigger.migration_name.contains("trigger_companies_touch"));
+        assert_eq!(db.triggers(None).unwrap().len(), 1);
+
+        db.rename_table("companies", "companies2").unwrap();
+        assert!(db.table_exists("companies2").unwrap());
+        assert!(!db.table_exists("companies").unwrap());
+        assert_eq!(db.triggers(Some("companies2")).unwrap().len(), 1);
+
+        db.drop_trigger("companies_touch").unwrap();
+        assert!(db.triggers(None).unwrap().is_empty());
+        db.drop_table("companies2").unwrap();
+        assert!(!db.table_exists("companies2").unwrap());
+    }
+
+    #[test]
+    fn runs_vacuum_analyze_and_pragmas() {
+        let (_dir, db) = temp_companies_db();
+        let write = db.pragma("user_version=7", true).unwrap();
+        assert!(write.session_id.is_some());
+        let read = db.pragma("user_version", false).unwrap();
+        assert!(read.session_id.is_none());
+        assert!(matches!(
+            read.rows[0].cells[0],
+            CellValue::Integer { value: 7 }
+        ));
+        assert!(db.analyze().unwrap().session_id.is_some());
+        assert!(db.vacuum().unwrap().session_id.is_some());
     }
 
     #[test]

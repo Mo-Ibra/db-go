@@ -6,11 +6,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use db_go_core::{
     preview_import, AlterTableOp, BackupInfo, CellValue, ColumnDesign, ColumnInfo, CountResult,
-    D1ExportResult, Database, DatabaseStats, Direction, ExportFormat, FilterSpec,
-    ImportColumnMapping, ImportFormat, ImportPreview, ImportRequest, ImportResult, IndexInfo,
-    JsonObject, MigrateResult, MigrationInfo, Page, QueryPlan, QueryResult, RestoreResult,
-    SchemaChange, SchemaGraph, SessionSummary, SortDirection, SortSpec, TableDesign, TableInfo,
-    ViewInfo, WriteResult,
+    D1ExportResult, Database, DatabaseStats, Direction, ExecResult, ExportFormat, FilterInput,
+    FilterSpec, ImportColumnMapping, ImportFormat, ImportPreview, ImportRequest, ImportResult,
+    IndexInfo, JsonObject, MaintenanceResult, MigrateResult, MigrationInfo, Page, QueryPlan,
+    QueryResult, RestoreResult, SchemaChange, SchemaGraph, SessionSummary, SortDirection, SortSpec,
+    TableDesign, TableInfo, TriggerInfo, ViewInfo, WriteResult,
 };
 use serde::Serialize;
 
@@ -76,6 +76,42 @@ enum Command {
         yes: bool,
     },
 
+    /// Drop a table.
+    DropTable {
+        db: PathBuf,
+        table: String,
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Rename a table.
+    RenameTable {
+        db: PathBuf,
+        from: String,
+        to: String,
+    },
+
+    /// Manage triggers.
+    Trigger {
+        #[command(subcommand)]
+        command: TriggerCommand,
+    },
+
+    /// Reclaim unused space with VACUUM.
+    Vacuum { db: PathBuf },
+
+    /// Update SQLite query-planner statistics with ANALYZE.
+    Analyze { db: PathBuf },
+
+    /// Read or write a PRAGMA.
+    Pragma {
+        db: PathBuf,
+        #[arg(help = "PRAGMA name or assignment, e.g. user_version or user_version=3")]
+        pragma: String,
+        #[arg(long, help = "Confirm a write PRAGMA and record an audit entry")]
+        yes: bool,
+    },
+
     /// Manage indexes.
     Index {
         #[command(subcommand)]
@@ -100,7 +136,7 @@ enum Command {
     /// List timestamped backups.
     Backups { db: PathBuf },
 
-    /// Restore a backup. A safety backup of the current database is created first.
+    /// Restore a backup. Take a backup first if you need to undo the restore.
     Restore {
         db: PathBuf,
         /// Backup path or filename, as shown by `dbgo backups`.
@@ -197,6 +233,25 @@ enum Command {
         limit: u32,
     },
 
+    /// Execute arbitrary SQL. Read-only unless --write is provided.
+    Exec {
+        db: PathBuf,
+        #[arg(conflicts_with = "file", help = "SQL statement or block")]
+        sql: Option<String>,
+        #[arg(long, conflicts_with = "sql", help = "Read SQL from a file")]
+        file: Option<PathBuf>,
+        #[arg(long, help = "Allow writes and DDL")]
+        write: bool,
+        #[arg(long, help = "Confirm writes; required with --write")]
+        yes: bool,
+        #[arg(long, help = "Do not wrap the SQL in a transaction")]
+        no_transaction: bool,
+        #[arg(long, help = "Return rows (single statement, e.g. RETURNING)")]
+        returning: bool,
+        #[arg(long, default_value_t = 1000)]
+        limit: u32,
+    },
+
     /// Show SQLite's query plan without running the statement.
     Explain {
         db: PathBuf,
@@ -257,6 +312,28 @@ enum Command {
         #[command(subcommand)]
         command: D1Command,
     },
+}
+
+#[derive(Subcommand)]
+enum TriggerCommand {
+    /// Create a trigger from SQL.
+    Create {
+        db: PathBuf,
+        name: String,
+        #[arg(long, conflicts_with = "file")]
+        sql: Option<String>,
+        #[arg(long, conflicts_with = "sql")]
+        file: Option<PathBuf>,
+    },
+    /// Drop a trigger.
+    Drop {
+        db: PathBuf,
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List triggers, optionally for one table.
+    List { db: PathBuf, table: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -451,6 +528,77 @@ fn run(cli: Cli) -> Result<(), String> {
                 output_schema_change(&change, cli.json, cli.jsonl)
             }
         }
+        Command::DropTable { db, table, yes } => {
+            if !yes {
+                return Err("refusing to drop a table without --yes".to_string());
+            }
+            let database = open(&db)?;
+            let change = database.drop_table(&table).map_err(err)?;
+            output_schema_change(&change, cli.json, cli.jsonl)
+        }
+        Command::RenameTable { db, from, to } => {
+            let database = open(&db)?;
+            let change = database.rename_table(&from, &to).map_err(err)?;
+            output_schema_change(&change, cli.json, cli.jsonl)
+        }
+        Command::Trigger { command } => match command {
+            TriggerCommand::Create {
+                db,
+                name,
+                sql,
+                file,
+            } => {
+                let sql = match (sql, file) {
+                    (Some(sql), None) => sql,
+                    (None, Some(file)) => std::fs::read_to_string(&file).map_err(err)?,
+                    (None, None) => {
+                        return Err("trigger create needs --sql or --file".to_string());
+                    }
+                    (Some(_), Some(_)) => unreachable!("clap rejects conflicting args"),
+                };
+                let database = open(&db)?;
+                let change = database.create_trigger(&name, &sql).map_err(err)?;
+                output_schema_change(&change, cli.json, cli.jsonl)
+            }
+            TriggerCommand::Drop { db, name, yes } => {
+                if !yes {
+                    return Err("refusing to drop a trigger without --yes".to_string());
+                }
+                let database = open(&db)?;
+                let change = database.drop_trigger(&name).map_err(err)?;
+                output_schema_change(&change, cli.json, cli.jsonl)
+            }
+            TriggerCommand::List { db, table } => {
+                let database = open(&db)?;
+                let triggers = database.triggers(table.as_deref()).map_err(err)?;
+                output_triggers(&triggers, cli.json, cli.jsonl)
+            }
+        },
+        Command::Vacuum { db } => {
+            let database = open(&db)?;
+            let result = database.vacuum().map_err(err)?;
+            output_maintenance(&result, cli.json, cli.jsonl)
+        }
+        Command::Analyze { db } => {
+            let database = open(&db)?;
+            let result = database.analyze().map_err(err)?;
+            output_maintenance(&result, cli.json, cli.jsonl)
+        }
+        Command::Pragma { db, pragma, yes } => {
+            let body = pragma.trim().trim_end_matches(';').trim();
+            let body = if body.to_ascii_lowercase().starts_with("pragma ") {
+                body[7..].trim()
+            } else {
+                body
+            };
+            let write = body.contains('=') || yes;
+            if write && !yes {
+                return Err("refusing to write a PRAGMA without --yes".to_string());
+            }
+            let database = open(&db)?;
+            let result = database.pragma(body, write).map_err(err)?;
+            output_maintenance(&result, cli.json, cli.jsonl)
+        }
         Command::Index { command } => match command {
             IndexCommand::Create {
                 db,
@@ -590,11 +738,11 @@ fn run(cli: Cli) -> Result<(), String> {
             if !yes {
                 return Err("refusing to update without --yes".to_string());
             }
-            let filter: FilterSpec = serde_json::from_str(&filter).map_err(err)?;
+            let filter: FilterInput = serde_json::from_str(&filter).map_err(err)?;
             let values: JsonObject = serde_json::from_str(&set).map_err(err)?;
             let database = open(&db)?;
             let result = database
-                .update_rows(&table, &filter, &values)
+                .update_rows_expr(&table, &filter.into_expr(), &values)
                 .map_err(err)?;
             output_write(&result, cli.json, cli.jsonl)
         }
@@ -607,9 +755,11 @@ fn run(cli: Cli) -> Result<(), String> {
             if !yes {
                 return Err("refusing to delete without --yes".to_string());
             }
-            let filter: FilterSpec = serde_json::from_str(&filter).map_err(err)?;
+            let filter: FilterInput = serde_json::from_str(&filter).map_err(err)?;
             let database = open(&db)?;
-            let result = database.delete_rows(&table, &filter).map_err(err)?;
+            let result = database
+                .delete_rows_expr(&table, &filter.into_expr())
+                .map_err(err)?;
             output_write(&result, cli.json, cli.jsonl)
         }
         Command::Sessions { db } => {
@@ -666,6 +816,45 @@ fn run(cli: Cli) -> Result<(), String> {
             let database = open(&db)?;
             let result = database.query(&sql, limit).map_err(err)?;
             output_query(&result, cli.json, cli.jsonl)
+        }
+        Command::Exec {
+            db,
+            sql,
+            file,
+            write,
+            yes,
+            no_transaction,
+            returning,
+            limit,
+        } => {
+            if write && !yes {
+                return Err("refusing to execute writes without --yes".to_string());
+            }
+            if returning && !write {
+                return Err("--returning requires --write".to_string());
+            }
+            let sql = match (sql, file) {
+                (Some(sql), None) => sql,
+                (None, Some(file)) => std::fs::read_to_string(&file).map_err(err)?,
+                (None, None) => {
+                    return Err("exec needs a SQL string or --file".to_string());
+                }
+                (Some(_), Some(_)) => unreachable!("clap rejects conflicting args"),
+            };
+            let database = open(&db)?;
+            let result = database
+                .exec(&sql, write, !no_transaction, returning, limit)
+                .map_err(|error| {
+                    let message = error.to_string();
+                    if !no_transaction
+                        && (message.contains("VACUUM") || message.contains("within a transaction"))
+                    {
+                        format!("{message} (try --no-transaction)")
+                    } else {
+                        message
+                    }
+                })?;
+            output_exec(&result, cli.json, cli.jsonl)
         }
         Command::Explain { db, sql } => {
             let database = open(&db)?;
@@ -1026,6 +1215,60 @@ fn output_indexes(indexes: &[IndexInfo], json: bool, jsonl: bool) -> Result<(), 
     print_table(table)
 }
 
+fn output_triggers(triggers: &[TriggerInfo], json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(triggers);
+    }
+    if jsonl {
+        return write_jsonl(triggers);
+    }
+
+    let mut table = human_table();
+    table.set_header(vec!["name", "table", "sql"]);
+    for trigger in triggers {
+        table.add_row(vec![
+            trigger.name.clone(),
+            trigger.table.clone(),
+            truncate(&trigger.sql.replace(['\n', '\r', '\t'], " "), 100),
+        ]);
+    }
+    print_table(table)
+}
+
+fn output_maintenance(result: &MaintenanceResult, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(result);
+    }
+    if jsonl {
+        if !result.rows.is_empty() {
+            return write_jsonl(&result.rows);
+        }
+        return write_jsonl(std::slice::from_ref(result));
+    }
+
+    if !result.columns.is_empty() {
+        let mut table = human_table();
+        table.set_header(
+            result
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>(),
+        );
+        for row in &result.rows {
+            table.add_row(row.cells.iter().map(cell_to_string).collect::<Vec<_>>());
+        }
+        print_table(table)?;
+    }
+
+    let session = result
+        .session_id
+        .as_deref()
+        .map(|session| format!(" · session {session}"))
+        .unwrap_or_default();
+    print_line(&format!("{}{}", result.action, session))
+}
+
 fn output_views(views: &[ViewInfo], json: bool, jsonl: bool) -> Result<(), String> {
     if json {
         return write_json(views);
@@ -1277,6 +1520,67 @@ fn output_query(result: &QueryResult, json: bool, jsonl: bool) -> Result<(), Str
         print_line("(truncated — raise --limit to see more)")?;
     }
     Ok(())
+}
+
+fn output_exec(result: &ExecResult, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(result);
+    }
+    if jsonl {
+        if !result.rows.is_empty() {
+            return write_jsonl(&result.rows);
+        }
+        return write_jsonl(std::slice::from_ref(result));
+    }
+
+    if !result.columns.is_empty() {
+        let mut table = human_table();
+        table.set_header(
+            result
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>(),
+        );
+        for row in &result.rows {
+            table.add_row(row.cells.iter().map(cell_to_string).collect::<Vec<_>>());
+        }
+        print_table(table)?;
+        if result.truncated {
+            print_line("(truncated — raise --limit to see more)")?;
+        }
+        if let Some(session) = &result.session_id {
+            print_line(&format!(
+                "affected {} row(s) · session {session} · {}",
+                result.affected,
+                if result.transactional {
+                    "transactional"
+                } else {
+                    "no transaction"
+                }
+            ))?;
+        }
+        return Ok(());
+    }
+
+    if result.read_only {
+        return print_line("no rows returned");
+    }
+
+    print_line(&format!(
+        "affected {} row(s){}{}",
+        result.affected,
+        result
+            .session_id
+            .as_deref()
+            .map(|session| format!(" · session {session}"))
+            .unwrap_or_default(),
+        if result.transactional {
+            " · transactional"
+        } else {
+            " · no transaction"
+        }
+    ))
 }
 
 fn output_plan(plan: &QueryPlan, json: bool, jsonl: bool) -> Result<(), String> {

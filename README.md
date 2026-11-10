@@ -21,6 +21,9 @@ What's here so far:
 - Visual table designer: types, PK/NN/unique, defaults, foreign keys, FK indexes
 - Structure inspector: DDL, columns, indexes, foreign keys, and index management
 - Alter tables from the GUI or CLI: add, rename, and drop columns with SQL preview
+- Drop/rename tables, manage triggers, and run VACUUM/ANALYZE/PRAGMA
+- Arbitrary SQL execution with `dbgo exec`, explicit write guard, transactions, and RETURNING
+- AND/OR/NOT filter expressions for updates and deletes
 - Indexes, views, and numbered migration files
 - Every schema change gets an audit row and a migration record
 - List tables in the sidebar
@@ -114,6 +117,7 @@ dbgo schema  ./samples/companies.db companies
 dbgo count   ./samples/companies.db companies
 dbgo page    ./samples/companies.db companies --limit 50 --cursor 201
 dbgo query   ./samples/companies.db "select id, name, city from companies limit 20"
+dbgo exec    ./samples/companies.db "select count(*) from companies"
 dbgo explain ./samples/companies.db "select * from companies where domain = 'acme.test'"
 dbgo stats   ./samples/companies.db
 dbgo export  ./samples/companies.db companies --format csv --output companies.csv
@@ -128,6 +132,14 @@ dbgo create-table . --file table.json
 dbgo alter-table . companies --add-column '{"name":"country","type_name":"TEXT","primary_key":false,"not_null":false,"unique":false,"default_value":null,"references":null}'
 dbgo alter-table . companies --rename-column city=location
 dbgo alter-table . companies --drop-column legacy_id --yes
+dbgo drop-table . legacy_companies --yes
+dbgo rename-table . companies organizations
+dbgo trigger create . audit_companies --sql "create trigger audit_companies after update on companies begin select 1; end"
+dbgo trigger list . companies
+dbgo trigger drop . audit_companies --yes
+dbgo vacuum .
+dbgo analyze .
+dbgo pragma . user_version
 dbgo index create . companies --name idx_companies_city --columns city
 dbgo index list . companies
 dbgo view create . active_companies --sql "select * from companies where active = 1"
@@ -257,6 +269,31 @@ dbgo view list .
 dbgo view drop . active_companies --yes
 ```
 
+### DDL and maintenance
+
+```bash
+dbgo drop-table . legacy_companies --yes
+dbgo rename-table . companies organizations
+
+dbgo trigger create . audit_companies --sql "create trigger audit_companies after update on companies begin select 1; end"
+dbgo trigger create . audit_companies --file trigger.sql
+dbgo trigger list . companies
+dbgo trigger drop . audit_companies --yes
+
+dbgo vacuum .
+dbgo analyze .
+dbgo pragma . user_version
+dbgo pragma . user_version=3 --yes
+```
+
+- `drop-table` and `trigger drop` require `--yes`.
+- Schema changes write a migration file and refresh `schema.md`.
+- `vacuum`, `analyze`, and write PRAGMAs are audited but do not create migrations.
+- Changing a column type or constraint is not a dedicated command. Use
+  `dbgo exec` or a migration file with a table rebuild.
+- `ATTACH` and explicit transaction control are available through
+  `dbgo exec --no-transaction`.
+
 ### Migrations
 
 Every schema change writes a numbered file into `migrations/` and records it in
@@ -311,6 +348,40 @@ dbgo sessions .
 - `update` / `delete` require `--yes`.
 - Primary key columns cannot be updated.
 - `dbgo sessions .` lists recent write sessions and action counts.
+
+### Filter expressions
+
+`--where` accepts either the original single condition or an AND/OR/NOT
+expression tree:
+
+```json
+{
+  "type": "and",
+  "filters": [
+    { "type": "condition", "column": "id", "op": "gte", "value": "2" },
+    {
+      "type": "or",
+      "filters": [
+        { "type": "condition", "column": "city", "op": "eq", "value": "Berlin" },
+        { "type": "condition", "column": "city", "op": "eq", "value": "Paris" }
+      ]
+    }
+  ]
+}
+```
+
+```bash
+dbgo update . companies \
+  --where '{"type":"not","filter":{"type":"condition","column":"id","op":"eq","value":1}}' \
+  --set '{"city":"Unknown"}' \
+  --yes
+```
+
+- Node types: `condition`, `and`, `or`, `not`.
+- Conditions use the same operators: `contains`, `eq`, `neq`, `gt`, `gte`,
+  `lt`, `lte`, `is_null`, `not_null`.
+- Old `{"column":...,"op":...,"value":...}` filters still work.
+- For arbitrary SQL expressions, use `dbgo exec`.
 
 The desktop app polls `PRAGMA data_version`. When the CLI changes the database,
 the open table, schema, and diagram refresh automatically.
@@ -373,6 +444,38 @@ The plan panel highlights:
 - `⚠ SCAN table` — a full table scan
 - `↗ SEARCH ... USING INDEX` / `USING COVERING INDEX` — an index lookup
 - `USE TEMP B-TREE` — a sort that may need attention
+
+## Execute arbitrary SQL
+
+`dbgo exec` is read-only unless you explicitly allow writes.
+
+```bash
+# read-only
+dbgo exec . "select * from companies limit 20"
+
+# writes and DDL require --write and --yes
+dbgo exec . "update employees set salary = salary + 1" --write --yes
+dbgo exec . "insert into archive select * from employees" --write --yes
+dbgo exec . --file script.sql --write --yes
+
+# return rows from a single write statement
+dbgo exec . "update companies set city = 'Berlin' returning id, city" \
+  --write --yes --returning
+
+# maintenance / statements that cannot run inside a transaction
+dbgo exec . "vacuum" --write --yes --no-transaction
+dbgo exec . "attach database 'other.db' as other; insert into archive select * from other.t;" \
+  --write --yes --no-transaction
+```
+
+- Read-only by default; writes require `--write` and `--yes`.
+- Normal writes are wrapped in one transaction.
+- `--no-transaction` runs the SQL directly, for `VACUUM`, `ATTACH`, write
+  PRAGMAs, or scripts with their own `BEGIN`/`COMMIT`.
+- `--returning` executes a single statement and returns rows; without it,
+  multi-statement writes report the total affected rows.
+- Writes get one audit session and no automatic backup.
+- `--limit` caps returned rows.
 
 ## Foreign-key navigation
 
