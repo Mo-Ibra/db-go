@@ -70,6 +70,38 @@
 }
 
 @layer components {
+  .btn {
+    @apply inline-flex h-8 items-center justify-center rounded-md border px-3 text-[12px] font-medium transition-colors disabled:cursor-default disabled:opacity-40;
+  }
+
+  .btn-neutral {
+    @apply border-line-strong bg-panel-2 text-fg hover:border-[#3a4a5a] hover:bg-panel-3;
+  }
+
+  .btn-primary {
+    @apply border-[#14b8a6] bg-linear-to-b from-accent to-[#14b8a6] font-bold text-[#03110f] hover:brightness-110;
+  }
+
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-fg hover:border-line-strong hover:bg-panel-2;
+  }
+
+  .field-input {
+    @apply h-8 rounded-md border border-line bg-ink px-2 text-xs text-fg outline-none placeholder:text-muted-2 focus:border-accent disabled:opacity-40;
+  }
+
+  .field-select {
+    @apply h-8 rounded-md border border-line bg-panel-2 px-1.5 text-xs text-fg outline-none focus:border-accent disabled:opacity-40;
+  }
+
+  .field-label {
+    @apply text-[10px] font-bold uppercase tracking-[0.12em] text-muted-2;
+  }
+
+  .card {
+    @apply rounded-lg border border-line bg-ink/40 p-3;
+  }
+
   .react-flow__controls {
     @apply overflow-hidden rounded-lg border border-line bg-panel shadow-lg;
   }

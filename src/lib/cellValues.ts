@@ -1,4 +1,4 @@
-import type { CellValue, ColumnInfo, Row } from "../types";
+import type { CellValue, ColumnInfo, Row } from "@/types";
 
 function typeMatches(typeName: string, needles: string[]): boolean {
   const upper = typeName.toUpperCase();

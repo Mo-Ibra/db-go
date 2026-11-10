@@ -32,7 +32,7 @@ import type {
   TableInfo,
   TableStats,
   WriteResult,
-} from "../types";
+} from "@/types";
 
 export const api = {
   pathExists: (path: string) => invoke<boolean>("path_exists", { path }),

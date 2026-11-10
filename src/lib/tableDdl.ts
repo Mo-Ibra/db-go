@@ -1,4 +1,4 @@
-import type { TableDesign } from "../types";
+import type { TableDesign } from "@/types";
 
 export const COLUMN_TYPES = [
   "TEXT",
