@@ -17,6 +17,7 @@ What's here so far:
 - Rust core with SQLite (WAL, memory-mapped I/O)
 - Create a database project: `db.sqlite`, `AGENTS.md`, `schema.md`, `migrations/`, `backups/`
 - Open an existing SQLite file; DBGo creates agent-ready files beside it
+- Recent databases on the welcome screen, with missing-file detection
 - Visual table designer: types, PK/NN/unique, defaults, foreign keys, FK indexes
 - Structure inspector: DDL, columns, indexes, foreign keys, and index management
 - Alter tables from the GUI or CLI: add, rename, and drop columns with SQL preview
@@ -185,6 +186,17 @@ The same adoption is available from the CLI:
 ```bash
 dbgo agent-guide ./path/to/companies.db
 ```
+
+## Recent databases
+
+The welcome screen keeps your last 10 opened databases.
+
+- Click a recent entry to reopen it immediately.
+- Entries whose files no longer exist are marked **missing** and cannot be opened.
+- Click **×** to remove one entry, or **Clear** to remove all entries.
+- Recent paths are stored locally on this machine; nothing is uploaded.
+- Opening a database from the picker, the welcome screen, or a command-line argument
+  updates the list.
 
 ## Schema changes
 

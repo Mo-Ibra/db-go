@@ -30,6 +30,7 @@ import type {
 } from "../types";
 
 export const api = {
+  pathExists: (path: string) => invoke<boolean>("path_exists", { path }),
   initialDatabase: () => invoke<string | null>("initial_database"),
   openDatabase: (path: string) => invoke<DbInfo>("open_database", { path }),
   createDatabase: (path: string, overwrite: boolean) =>

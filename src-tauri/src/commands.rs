@@ -20,6 +20,11 @@ fn lock_error() -> String {
 }
 
 #[tauri::command]
+pub fn path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
+#[tauri::command]
 pub async fn initial_database() -> Result<Option<String>, String> {
     let candidate = std::env::args()
         .skip(1)
@@ -42,7 +47,12 @@ pub async fn open_database(path: String, state: State<'_, AppState>) -> Result<D
                 (None, Some(error.to_string()))
             }
         };
-        let database_path = database.path().display().to_string();
+        let database_path = database
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| database.path().to_path_buf())
+            .display()
+            .to_string();
         let tables = database.tables().map_err(to_error)?;
         eprintln!(
             "[dbgo] opened database: {database_path} ({} tables)",
@@ -52,7 +62,12 @@ pub async fn open_database(path: String, state: State<'_, AppState>) -> Result<D
             path: database_path,
             tables,
             backup_path: None,
-            project_path: database.project_dir().map(|p| p.display().to_string()),
+            project_path: database.project_dir().map(|p| {
+                p.canonicalize()
+                    .unwrap_or_else(|_| p.to_path_buf())
+                    .display()
+                    .to_string()
+            }),
             agent_files,
             agent_files_error,
         };

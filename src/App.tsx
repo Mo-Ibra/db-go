@@ -58,6 +58,65 @@ const DiagramView = lazy(() =>
 const PAGE_SIZES = [100, 200, 500, 1000];
 const QUERY_LIMITS = [100, 500, 1000, 5000];
 const QUERY_HISTORY_KEY = "dbgo:query-history";
+const RECENT_DATABASES_KEY = "dbgo:recent-databases";
+const RECENT_DATABASE_LIMIT = 10;
+
+type RecentDatabase = {
+  path: string;
+  name: string;
+  openedAt: number;
+};
+
+function basename(path: string): string {
+  return (
+    path
+      .split(/[\\/]/)
+      .filter((part) => part && part !== ".")
+      .pop() ?? path
+  );
+}
+
+function loadRecentDatabases(): RecentDatabase[] {
+  try {
+    const raw = localStorage.getItem(RECENT_DATABASES_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (item): item is RecentDatabase =>
+          item !== null &&
+          typeof item === "object" &&
+          typeof (item as RecentDatabase).path === "string" &&
+          typeof (item as RecentDatabase).name === "string" &&
+          typeof (item as RecentDatabase).openedAt === "number",
+      )
+      .slice(0, RECENT_DATABASE_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function persistRecentDatabases(entries: RecentDatabase[]) {
+  try {
+    localStorage.setItem(RECENT_DATABASES_KEY, JSON.stringify(entries));
+  } catch {
+    // Recent databases are a convenience; ignore storage failures.
+  }
+}
+
+function formatRecentOpened(ms: number): string {
+  const date = new Date(ms);
+  const now = new Date();
+  if (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  ) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
 
 const FILTER_OPS: { value: FilterOp; label: string }[] = [
   { value: "contains", label: "contains" },
@@ -169,6 +228,10 @@ function syncFilterColumn(
 
 export default function App() {
   const [db, setDb] = useState<DbInfo | null>(null);
+  const [recentDatabases, setRecentDatabases] = useState<RecentDatabase[]>(
+    loadRecentDatabases,
+  );
+  const [missingRecents, setMissingRecents] = useState<Set<string>>(new Set());
   const [tables, setTables] = useState<TableInfo[]>([]);
   const [filterText, setFilterText] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -742,6 +805,50 @@ export default function App() {
     }
   }, []);
 
+  const rememberDatabase = useCallback((info: DbInfo) => {
+    const fileName = basename(info.path);
+    const name = info.project_path ? basename(info.project_path) : fileName;
+    const entry: RecentDatabase = {
+      path: info.path,
+      name: name || fileName,
+      openedAt: Date.now(),
+    };
+    setRecentDatabases((current) => {
+      const next = [
+        entry,
+        ...current.filter((item) => item.path !== entry.path),
+      ].slice(0, RECENT_DATABASE_LIMIT);
+      persistRecentDatabases(next);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (recentDatabases.length === 0) {
+      setMissingRecents(new Set());
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      recentDatabases.map(async (entry) => ({
+        path: entry.path,
+        exists: await api.pathExists(entry.path).catch(() => true),
+      })),
+    ).then((results) => {
+      if (cancelled) return;
+      setMissingRecents(
+        new Set(
+          results
+            .filter((item) => !item.exists)
+            .map((item) => item.path),
+        ),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [recentDatabases]);
+
   const applyDbInfo = useCallback((info: DbInfo) => {
     setDb(info);
     setTables(info.tables);
@@ -796,12 +903,13 @@ export default function App() {
   }, []);
 
   const openPath = useCallback(
-    async (path: string) => {
+    async (path: string): Promise<boolean> => {
       setLoading(true);
       setError(null);
       try {
         const info = await api.openDatabase(path);
         applyDbInfo(info);
+        rememberDatabase(info);
         if (info.agent_files_error) {
           setNotice(`Agent files: ${info.agent_files_error}`);
         } else if (info.agent_files?.created) {
@@ -819,14 +927,50 @@ export default function App() {
 
         const firstTable = info.tables[0]?.name;
         if (firstTable) void loadTable(firstTable, null);
+        return true;
       } catch (cause) {
         setError(String(cause));
+        return false;
       } finally {
         setLoading(false);
       }
     },
-    [applyDbInfo, loadTable],
+    [applyDbInfo, loadTable, rememberDatabase],
   );
+
+  const openRecentDatabase = useCallback(
+    async (entry: RecentDatabase) => {
+      if (missingRecents.has(entry.path)) return;
+      const opened = await openPath(entry.path);
+      if (!opened) {
+        setMissingRecents((current) => {
+          const next = new Set(current);
+          next.add(entry.path);
+          return next;
+        });
+      }
+    },
+    [missingRecents, openPath],
+  );
+
+  const removeRecentDatabase = useCallback((path: string) => {
+    setRecentDatabases((current) => {
+      const next = current.filter((item) => item.path !== path);
+      persistRecentDatabases(next);
+      return next;
+    });
+    setMissingRecents((current) => {
+      const next = new Set(current);
+      next.delete(path);
+      return next;
+    });
+  }, []);
+
+  const clearRecentDatabases = useCallback(() => {
+    setRecentDatabases([]);
+    setMissingRecents(new Set());
+    persistRecentDatabases([]);
+  }, []);
 
   const createNewDatabase = useCallback(async () => {
     if (guardPending()) return;
@@ -856,6 +1000,7 @@ export default function App() {
         }
 
         applyDbInfo(info);
+        rememberDatabase(info);
         void api.schemaGraph().then(setSchemaGraph).catch(() => setSchemaGraph(null));
         if (info.backup_path) {
           setNotice(`Existing database backed up to ${info.backup_path}`);
@@ -1985,26 +2130,91 @@ export default function App() {
           )}
 
           {!db ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2.5 p-10 text-center">
-              <div className="grid h-[54px] w-[54px] place-items-center rounded-[14px] bg-linear-to-br from-accent to-accent-2 text-base font-extrabold tracking-tight text-[#04110f] shadow-[0_14px_40px_rgba(45,212,191,0.25)]">
-                DB
+            <div className="flex flex-1 flex-col items-center overflow-auto p-10 text-center">
+              <div className="my-auto flex w-full max-w-[560px] flex-col items-center gap-2.5">
+                <div className="grid h-[54px] w-[54px] place-items-center rounded-[14px] bg-linear-to-br from-accent to-accent-2 text-base font-extrabold tracking-tight text-[#04110f] shadow-[0_14px_40px_rgba(45,212,191,0.25)]">
+                  DB
+                </div>
+                <h1 className="mt-1 text-[22px] tracking-tight">Create or open a database</h1>
+                <p className="max-w-[420px] text-[13px] leading-relaxed text-muted">
+                  DBGo is a local-first SQL workbench. Your data never leaves this machine.
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    className={BTN_LARGE_PRIMARY}
+                    onClick={() => void createNewDatabase()}
+                  >
+                    Create database
+                  </button>
+                  <button className={BTN_LARGE_NEUTRAL} onClick={() => void openDb()}>
+                    Open database
+                  </button>
+                </div>
+                <div className="mt-1.5 font-mono text-[11px] text-muted-2">Ctrl / Cmd + O</div>
+
+                {recentDatabases.length > 0 && (
+                  <div className="mt-6 w-full text-left">
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="text-[10.5px] font-bold uppercase tracking-[0.14em] text-muted">
+                        Recent databases
+                      </span>
+                      <button
+                        type="button"
+                        className="text-[10.5px] text-muted-2 hover:text-fg"
+                        onClick={clearRecentDatabases}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <div className="overflow-hidden rounded-xl border border-line bg-panel/60">
+                      {recentDatabases.map((entry) => {
+                        const missing = missingRecents.has(entry.path);
+                        return (
+                          <div
+                            key={entry.path}
+                            className="flex items-center gap-2 border-b border-line/60 px-3 py-2 last:border-b-0"
+                          >
+                            <button
+                              type="button"
+                              data-recent-path={entry.path}
+                              onClick={() => void openRecentDatabase(entry)}
+                              disabled={missing}
+                              className="flex min-w-0 flex-1 flex-col items-start text-left disabled:cursor-default disabled:opacity-45"
+                              title={entry.path}
+                            >
+                              <span className="flex min-w-0 items-center gap-2">
+                                <span className="truncate font-mono text-[12px] text-fg">
+                                  {entry.name}
+                                </span>
+                                {missing && (
+                                  <span className="rounded-full border border-danger/30 bg-danger/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em] text-[#fca5a5]">
+                                    missing
+                                  </span>
+                                )}
+                              </span>
+                              <span className="mt-0.5 w-full truncate font-mono text-[10px] text-muted-2">
+                                {entry.path}
+                              </span>
+                            </button>
+                            <span className="flex-none text-[10px] text-muted-2">
+                              {formatRecentOpened(entry.openedAt)}
+                            </span>
+                            <button
+                              type="button"
+                              aria-label={`Remove ${entry.name} from recent databases`}
+                              onClick={() => removeRecentDatabase(entry.path)}
+                              className="inline-flex h-6 w-6 flex-none items-center justify-center rounded-md border border-transparent text-base leading-none text-muted hover:border-line-strong hover:bg-panel-2 hover:text-fg"
+                              title="Remove from recent databases"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
-              <h1 className="mt-1 text-[22px] tracking-tight">Create or open a database</h1>
-              <p className="max-w-[420px] text-[13px] leading-relaxed text-muted">
-                DBGo is a local-first SQL workbench. Your data never leaves this machine.
-              </p>
-              <div className="flex items-center gap-2">
-                <button
-                  className={BTN_LARGE_PRIMARY}
-                  onClick={() => void createNewDatabase()}
-                >
-                  Create database
-                </button>
-                <button className={BTN_LARGE_NEUTRAL} onClick={() => void openDb()}>
-                  Open database
-                </button>
-              </div>
-              <div className="mt-1.5 font-mono text-[11px] text-muted-2">Ctrl / Cmd + O</div>
             </div>
           ) : !selected ? (
             tables.length === 0 ? (
