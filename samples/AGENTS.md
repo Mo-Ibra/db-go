@@ -60,6 +60,35 @@ dbgo export . --query "select * from companies order by id" --format json --outp
 - Omit `--output` to write data to stdout.
 - BLOB values are base64-encoded.
 
+## Import
+
+```bash
+dbgo import . people --file people.csv --preview
+dbgo import . people --file people.csv
+dbgo import . --file people.csv --create-table
+dbgo import . people --file people.csv --upsert-key domain
+dbgo import . people --file people.csv --map "Full Name=name"
+```
+
+- CSV, JSON, and JSONL are supported.
+- Empty CSV cells become NULL.
+- Default mapping matches source and target column names case-insensitively.
+- Create-table imports infer column types and sanitize column names.
+- Upsert requires a PRIMARY KEY or UNIQUE constraint on the key column.
+- Imports write directly; backups are manual (`dbgo backup .`).
+
+## D1 export
+
+```bash
+dbgo d1 export . --output ./d1 --name my-db
+```
+
+- Generates `schema.sql`, `data-*.sql`, `wrangler.toml`, `manifest.json`, and `README.md`.
+- Internal `_dbgo_*` tables are excluded.
+- Tables are ordered by foreign keys; data is split into batches.
+- Deploy manually with Wrangler; DBGo does not deploy.
+- Use `--force` to overwrite a non-empty output directory.
+
 ## GUI edits
 
 The desktop app stages row edits and writes them only when the user clicks

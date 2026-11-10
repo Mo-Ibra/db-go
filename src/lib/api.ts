@@ -4,6 +4,7 @@ import type {
   BackupInfo,
   ColumnInfo,
   CountResult,
+  D1ExportResult,
   DatabaseStats,
   DbInfo,
   ExportFormat,
@@ -95,6 +96,8 @@ export const api = {
     }),
   importFile: (path: string, request: ImportRequest) =>
     invoke<ImportResult>("import_file", { path, request }),
+  d1Export: (output: string, name: string | null, force: boolean) =>
+    invoke<D1ExportResult>("d1_export", { output, name, force }),
   loadTablePage: (
     table: string,
     filter: FilterSpec | null,

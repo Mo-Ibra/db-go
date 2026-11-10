@@ -7,6 +7,7 @@ import type {
   CellValue,
   ColumnInfo,
   CountResult,
+  D1ExportResult,
   DbInfo,
   ExportFormat,
   FilterOp,
@@ -36,6 +37,7 @@ import { AlterTableDialog } from "./components/AlterTableDialog";
 import { MigrationsDialog } from "./components/MigrationsDialog";
 import { BackupsDialog } from "./components/BackupsDialog";
 import { ImportDialog } from "./components/ImportDialog";
+import { D1ExportDialog } from "./components/D1ExportDialog";
 import { QueryPlanPanel } from "./components/QueryPlanPanel";
 import { TableDesigner } from "./components/TableDesigner";
 import { cn } from "./lib/cn";
@@ -296,6 +298,7 @@ export default function App() {
   const [migrationsError, setMigrationsError] = useState<string | null>(null);
   const [showBackups, setShowBackups] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showD1Export, setShowD1Export] = useState(false);
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [backupsLoading, setBackupsLoading] = useState(false);
   const [backupsError, setBackupsError] = useState<string | null>(null);
@@ -897,6 +900,7 @@ export default function App() {
     setMigrationsLoading(false);
     setShowBackups(false);
     setShowImport(false);
+    setShowD1Export(false);
     setBackups([]);
     setBackupsError(null);
     setBackupsLoading(false);
@@ -1624,6 +1628,22 @@ export default function App() {
     [refreshAfterSchemaChange, openReferencedTable],
   );
 
+  const requestD1Export = useCallback(() => {
+    if (guardPending()) return;
+    setShowD1Export(true);
+  }, [guardPending]);
+
+  const handleD1Exported = useCallback((result: D1ExportResult) => {
+    setShowD1Export(false);
+    const warnings =
+      result.warnings.length > 0
+        ? ` · ${result.warnings.length} warning${result.warnings.length === 1 ? "" : "s"}`
+        : "";
+    setNotice(
+      `D1 export written to ${result.output_dir} · ${result.rows.toLocaleString()} row(s) · ${result.data_files.length} data file${result.data_files.length === 1 ? "" : "s"}${warnings}`,
+    );
+  }, []);
+
   const handleRestoreBackup = useCallback(
     async (backup: BackupInfo) => {
       if (guardPending()) return;
@@ -2019,6 +2039,16 @@ export default function App() {
               title="Import CSV, JSON, or JSONL"
             >
               Import
+            </button>
+          )}
+          {db && (
+            <button
+              className={BTN_GHOST}
+              onClick={requestD1Export}
+              disabled={loading || restoringBackup !== null || creatingBackup}
+              title="Export a Cloudflare D1 bundle"
+            >
+              D1 Export
             </button>
           )}
           <button className={BTN_GHOST} onClick={() => void createNewDatabase()}>
@@ -2884,6 +2914,19 @@ export default function App() {
         selectedTable={selected}
         onClose={() => setShowImport(false)}
         onImported={handleImported}
+      />
+
+      <D1ExportDialog
+        open={showD1Export}
+        defaultName={
+          db
+            ? db.project_path
+              ? basename(db.project_path)
+              : basename(db.path).replace(/\.[^.]+$/, "")
+            : "my-db"
+        }
+        onClose={() => setShowD1Export(false)}
+        onExported={handleD1Exported}
       />
 
       <TableDesigner

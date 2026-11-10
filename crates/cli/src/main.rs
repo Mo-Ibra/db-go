@@ -6,10 +6,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use db_go_core::{
     preview_import, AlterTableOp, BackupInfo, CellValue, ColumnDesign, ColumnInfo, CountResult,
-    Database, DatabaseStats, Direction, ExportFormat, FilterSpec, ImportColumnMapping,
-    ImportFormat, ImportPreview, ImportRequest, ImportResult, IndexInfo, JsonObject, MigrateResult,
-    MigrationInfo, Page, QueryPlan, QueryResult, RestoreResult, SchemaChange, SchemaGraph,
-    SessionSummary, SortDirection, SortSpec, TableDesign, TableInfo, ViewInfo, WriteResult,
+    D1ExportResult, Database, DatabaseStats, Direction, ExportFormat, FilterSpec,
+    ImportColumnMapping, ImportFormat, ImportPreview, ImportRequest, ImportResult, IndexInfo,
+    JsonObject, MigrateResult, MigrationInfo, Page, QueryPlan, QueryResult, RestoreResult,
+    SchemaChange, SchemaGraph, SessionSummary, SortDirection, SortSpec, TableDesign, TableInfo,
+    ViewInfo, WriteResult,
 };
 use serde::Serialize;
 
@@ -250,6 +251,12 @@ enum Command {
         #[arg(long, help = "Preview columns, types, and rows without writing")]
         preview: bool,
     },
+
+    /// Export a Cloudflare D1 deployment bundle.
+    D1 {
+        #[command(subcommand)]
+        command: D1Command,
+    },
 }
 
 #[derive(Subcommand)]
@@ -297,6 +304,20 @@ enum ViewCommand {
     },
     /// List views.
     List { db: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum D1Command {
+    /// Export schema, data, wrangler.toml, and a README for Cloudflare D1.
+    Export {
+        db: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, help = "D1 database name; defaults to the project name")]
+        name: Option<String>,
+        #[arg(long, help = "Overwrite a non-empty output directory")]
+        force: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -758,6 +779,20 @@ fn run(cli: Cli) -> Result<(), String> {
             let result = database.import_file(&file, &request).map_err(err)?;
             output_import_result(&result, cli.json, cli.jsonl)
         }
+        Command::D1 { command } => match command {
+            D1Command::Export {
+                db,
+                output,
+                name,
+                force,
+            } => {
+                let database = open(&db)?;
+                let result = database
+                    .export_d1(&output, name.as_deref(), force)
+                    .map_err(err)?;
+                output_d1_export(&result, cli.json, cli.jsonl)
+            }
+        },
     }
 }
 
@@ -1349,6 +1384,35 @@ fn output_import_result(result: &ImportResult, json: bool, jsonl: bool) -> Resul
         ));
     }
     print_line(&message)
+}
+
+fn output_d1_export(result: &D1ExportResult, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(result);
+    }
+    if jsonl {
+        return write_jsonl(std::slice::from_ref(result));
+    }
+
+    print_line(&format!(
+        "exported {} row(s) from {} table(s) to {}",
+        result.rows,
+        result.tables.len(),
+        result.output_dir
+    ))?;
+    print_line(&format!("schema {}", result.schema_file))?;
+    for file in &result.data_files {
+        print_line(&format!("data {file}"))?;
+    }
+    print_line(&format!("wrangler {}", result.wrangler_file))?;
+    print_line(&format!("readme {}", result.readme_file))?;
+    if !result.warnings.is_empty() {
+        print_line("warnings:")?;
+        for warning in &result.warnings {
+            print_line(&format!("  - {warning}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn import_format_label(format: ImportFormat) -> &'static str {

@@ -33,6 +33,7 @@ What's here so far:
 - Clickable foreign-key navigation from row details
 - Table/index size stats and CSV/JSON result export
 - CSV/JSONL import with preview, column mapping, and create-table-from-file
+- Cloudflare D1 export bundle (CLI + GUI): schema, batched data, Wrangler config, README
 - Query history and read-only query results in the same grid
 - Click-to-sort columns, server-side filtering, and a row detail panel
 - Interactive ERD diagram: foreign-key edges, auto-layout, search, drag positions
@@ -118,6 +119,7 @@ dbgo stats   ./samples/companies.db
 dbgo export  ./samples/companies.db companies --format csv --output companies.csv
 dbgo export  ./samples/companies.db --query "select * from companies" --format json --output companies.json
 dbgo import  ./database people --file people.csv --preview
+dbgo d1 export ./database --output ./d1 --name my-db
 
 # project commands (run inside the project folder)
 cd database
@@ -446,6 +448,42 @@ dbgo import . people --file people.csv --no-header --delimiter ';'
 - Numeric-looking CSV columns with leading zeros are inferred as TEXT so values
   like `00123` are preserved.
 
+## D1 export
+
+Generate a deployment bundle for Cloudflare D1. This is a one-way export; DBGo
+does not deploy it for you.
+
+- **GUI:** click **D1 Export** in the header, choose a folder, optionally change
+  the D1 database name and overwrite setting, then click **Export**.
+- **CLI:**
+
+```bash
+dbgo d1 export . --output ./d1 --name my-db
+dbgo d1 export . --output ./d1 --name my-db --force
+```
+
+The bundle contains:
+
+```text
+d1/
+├── schema.sql        # tables, indexes, views, triggers
+├── data-0001.sql     # batched INSERT statements
+├── wrangler.toml     # D1 binding template
+├── manifest.json     # tables, row counts, warnings
+└── README.md         # Wrangler commands
+```
+
+Behavior:
+
+- Internal `_dbgo_*` and `sqlite_*` objects are excluded.
+- Tables are ordered by foreign-key dependencies.
+- Data is split into files at roughly 500 rows or 500 KB.
+- TEXT is SQL-escaped, BLOBs use `X'...'` hex literals, and NULL is preserved.
+- Virtual tables and their shadow tables are skipped with a warning.
+- Foreign-key cycles are reported and fall back to alphabetical table order.
+- `wrangler.toml` contains a placeholder `database_id` for you to fill in.
+- No automatic deploy: follow the generated README or run Wrangler yourself.
+
 ## Sort, filter, inspect
 
 - Click a column header to cycle ascending → descending → unsorted.
@@ -498,7 +536,6 @@ src/             React UI (Vite)
 
 ## Next
 
-- D1 export and deploy
 - Postgres and MySQL drivers
 - Installers and release CI
 

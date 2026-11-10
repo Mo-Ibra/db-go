@@ -132,6 +132,23 @@ export type ImportResult = {
   ignored_columns: string[];
 };
 
+export type D1TableExport = {
+  name: string;
+  rows: number;
+};
+
+export type D1ExportResult = {
+  output_dir: string;
+  schema_file: string;
+  data_files: string[];
+  manifest_file: string;
+  wrangler_file: string;
+  readme_file: string;
+  tables: D1TableExport[];
+  rows: number;
+  warnings: string[];
+};
+
 export type SchemaMap = Record<string, string[]>;
 
 export type SchemaColumn = {

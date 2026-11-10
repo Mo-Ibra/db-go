@@ -31,6 +31,7 @@ pub fn run() {
             commands::table_stats,
             commands::preview_import,
             commands::import_file,
+            commands::d1_export,
             commands::export_data,
             commands::save_changes,
             commands::close_database,

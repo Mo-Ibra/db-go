@@ -3,11 +3,11 @@ use std::io::Write;
 use std::path::Path;
 
 use db_go_core::{
-    AlterTableOp, BackupInfo, ColumnInfo, CountResult, Database, DatabaseStats, DbInfo, Direction,
-    ExportFormat, FilterSpec, ForeignKeyInfo, ImportFormat, ImportPreview, ImportRequest,
-    ImportResult, JsonObject, MigrateResult, MigrationInfo, Page, QueryPlan, QueryResult,
-    RestoreResult, RowUpdate, SchemaChange, SchemaGraph, SortSpec, TableDesign, TableDetails,
-    TableInfo, TableStats, WriteResult,
+    AlterTableOp, BackupInfo, ColumnInfo, CountResult, D1ExportResult, Database, DatabaseStats,
+    DbInfo, Direction, ExportFormat, FilterSpec, ForeignKeyInfo, ImportFormat, ImportPreview,
+    ImportRequest, ImportResult, JsonObject, MigrateResult, MigrationInfo, Page, QueryPlan,
+    QueryResult, RestoreResult, RowUpdate, SchemaChange, SchemaGraph, SortSpec, TableDesign,
+    TableDetails, TableInfo, TableStats, WriteResult,
 };
 use tauri::State;
 
@@ -586,6 +586,34 @@ pub async fn export_data(
         writer.flush().map_err(to_error)?;
         eprintln!("[dbgo] exported {rows} row(s) to {path}");
         Ok(ExportResponse { path, rows })
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn d1_export(
+    output: String,
+    name: Option<String>,
+    force: bool,
+    state: State<'_, AppState>,
+) -> Result<D1ExportResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<D1ExportResult, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let result = database
+            .export_d1(Path::new(&output), name.as_deref(), force)
+            .map_err(to_error)?;
+        eprintln!(
+            "[dbgo] D1 export: {} row(s), {} data file(s), {}",
+            result.rows,
+            result.data_files.len(),
+            result.output_dir
+        );
+        Ok(result)
     })
     .await
     .map_err(to_error)?
