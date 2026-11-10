@@ -48,6 +48,65 @@ dbgo delete . companies \
 - Updating primary key columns is not supported.
 - Every write is audited. Backups are manual (`dbgo backup .`).
 
+`--where` also accepts an AND/OR/NOT expression tree:
+
+```json
+{
+  "type": "and",
+  "filters": [
+    { "type": "condition", "column": "id", "op": "gte", "value": "2" },
+    { "type": "or", "filters": [
+      { "type": "condition", "column": "city", "op": "eq", "value": "Berlin" },
+      { "type": "condition", "column": "city", "op": "eq", "value": "Paris" }
+    ] }
+  ]
+}
+```
+
+Node types: `condition`, `and`, `or`, `not`. Old single-condition JSON still
+works. Values may be strings, numbers, or booleans.
+
+## Execute arbitrary SQL
+
+`dbgo exec` is read-only unless `--write` and `--yes` are provided.
+
+```bash
+dbgo exec . "select * from companies limit 20"
+dbgo exec . "update employees set salary = salary + 1" --write --yes
+dbgo exec . --file script.sql --write --yes
+dbgo exec . "update companies set city = 'Berlin' returning id, city" \
+  --write --yes --returning
+dbgo exec . "vacuum" --write --yes --no-transaction
+```
+
+- Normal writes run in one transaction.
+- `--no-transaction` is required for VACUUM, ATTACH, write PRAGMAs, or scripts
+  with their own BEGIN/COMMIT.
+- `--returning` executes a single statement and returns rows.
+- Writes get one audit session; no automatic backup.
+- `--limit` caps returned rows.
+
+## DDL and maintenance
+
+```bash
+dbgo drop-table . legacy_companies --yes
+dbgo rename-table . companies organizations
+dbgo trigger create . audit_companies --sql "create trigger audit_companies after update on companies begin select 1; end"
+dbgo trigger create . audit_companies --file trigger.sql
+dbgo trigger list . companies
+dbgo trigger drop . audit_companies --yes
+dbgo vacuum .
+dbgo analyze .
+dbgo pragma . user_version
+dbgo pragma . user_version=3 --yes
+```
+
+- Drop table/trigger require `--yes`.
+- Schema changes write migrations and refresh `schema.md`.
+- `vacuum`, `analyze`, and write PRAGMAs are audited but do not create migrations.
+- Use `dbgo exec` for column type changes, table rebuilds, ATTACH, and other
+  arbitrary DDL.
+
 ## Export
 
 ```bash
@@ -73,6 +132,8 @@ dbgo import . people --file people.csv --map "Full Name=name"
 - CSV, JSON, and JSONL are supported.
 - Empty CSV cells become NULL.
 - Default mapping matches source and target column names case-insensitively.
+- `--map` overrides matching columns without disabling default mapping; use
+  `--map "Source="` to skip a source column.
 - Create-table imports infer column types and sanitize column names.
 - Upsert requires a PRIMARY KEY or UNIQUE constraint on the key column.
 - Imports write directly; backups are manual (`dbgo backup .`).
@@ -216,7 +277,8 @@ not edit a migration that is already recorded as applied.
 - Run `dbgo graph . --json` before changing the schema.
 - Use `--json` or `--jsonl` for machine-readable output.
 - Run commands from this folder and use `.` as the database path.
-- Use `--yes` for update/delete.
+- Use `--yes` for update/delete, drop-table, trigger drop, `exec --write`, and
+  write PRAGMAs.
 - Use `--yes` when dropping columns, indexes, or views.
 - Use `--yes` when restoring a backup.
 - Prefer `upsert` with a natural key over blind inserts.

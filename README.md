@@ -381,6 +381,7 @@ dbgo update . companies \
 - Conditions use the same operators: `contains`, `eq`, `neq`, `gt`, `gte`,
   `lt`, `lte`, `is_null`, `not_null`.
 - Old `{"column":...,"op":...,"value":...}` filters still work.
+- Values may be strings, numbers, or booleans.
 - For arbitrary SQL expressions, use `dbgo exec`.
 
 The desktop app polls `PRAGMA data_version`. When the CLI changes the database,
@@ -532,7 +533,9 @@ The header **Import** button opens a preview-first importer.
   the file using inferred types.
 - Optional upsert key for existing tables.
 - Writes directly and does not create a backup automatically.
-- Unmapped source columns are ignored and reported.
+- Source columns without a match are ignored and reported. `--map` overrides
+  matching columns without disabling default mapping; use `--map "Source="` to
+  skip a source column.
 
 ```bash
 dbgo import . people --file people.csv --preview

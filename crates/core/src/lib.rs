@@ -275,6 +275,7 @@ pub enum FilterOp {
 pub struct FilterSpec {
     pub column: String,
     pub op: FilterOp,
+    #[serde(default, deserialize_with = "deserialize_filter_value")]
     pub value: Option<String>,
 }
 
@@ -284,6 +285,7 @@ pub enum FilterExpr {
     Condition {
         column: String,
         op: FilterOp,
+        #[serde(default, deserialize_with = "deserialize_filter_value")]
         value: Option<String>,
     },
     And {
@@ -320,6 +322,26 @@ impl FilterInput {
             FilterInput::Spec(spec) => spec.into(),
             FilterInput::Expr(expr) => expr,
         }
+    }
+}
+
+fn deserialize_filter_value<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value)),
+        Some(serde_json::Value::Number(value)) => Ok(Some(value.to_string())),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(if value { "1" } else { "0" }.to_string())),
+        Some(other) => Err(D::Error::custom(format!(
+            "filter value must be a string, number, or boolean, got {other}"
+        ))),
     }
 }
 
@@ -4228,7 +4250,7 @@ dbgo delete . companies \
 ```
 
 Node types: `condition`, `and`, `or`, `not`. Old single-condition JSON still
-works.
+works. Values may be strings, numbers, or booleans.
 
 ## Execute arbitrary SQL
 
@@ -4296,6 +4318,8 @@ dbgo import . people --file people.csv --map "Full Name=name"
 - CSV, JSON, and JSONL are supported.
 - Empty CSV cells become NULL.
 - Default mapping matches source and target column names case-insensitively.
+- `--map` overrides matching columns without disabling default mapping; use
+  `--map "Source="` to skip a source column.
 - Create-table imports infer column types and sanitize column names.
 - Upsert requires a PRIMARY KEY or UNIQUE constraint on the key column.
 - Imports write directly; backups are manual (`dbgo backup .`).
@@ -4439,7 +4463,8 @@ not edit a migration that is already recorded as applied.
 - Run `dbgo graph . --json` before changing the schema.
 - Use `--json` or `--jsonl` for machine-readable output.
 - Run commands from this folder and use `.` as the database path.
-- Use `--yes` for update/delete.
+- Use `--yes` for update/delete, drop-table, trigger drop, `exec --write`, and
+  write PRAGMAs.
 - Use `--yes` when dropping columns, indexes, or views.
 - Use `--yes` when restoring a backup.
 - Prefer `upsert` with a natural key over blind inserts.
@@ -5089,48 +5114,46 @@ fn resolve_import_mapping(
     target_columns: &[ColumnInfo],
     requested: &[ImportColumnMapping],
 ) -> Result<Vec<(String, String)>> {
+    let mut requested_by_source: HashMap<&str, Option<&str>> = HashMap::new();
+    for mapping in requested {
+        if !source_columns
+            .iter()
+            .any(|source| source == &mapping.source)
+        {
+            return Err(DbError::InvalidDesign(format!(
+                "source column not found: {}",
+                mapping.source
+            )));
+        }
+        requested_by_source.insert(mapping.source.as_str(), mapping.target.as_deref());
+    }
+
     let mut pairs = Vec::new();
     let mut used_targets = HashSet::new();
-
-    if requested.is_empty() {
-        for source in source_columns {
-            if let Some(target) = target_columns
+    for source in source_columns {
+        let target = match requested_by_source.get(source.as_str()) {
+            Some(None) => None,
+            Some(Some(target)) if target.trim().is_empty() => None,
+            Some(Some(target)) => {
+                let actual = target_columns
+                    .iter()
+                    .find(|column| column.name.eq_ignore_ascii_case(target))
+                    .ok_or_else(|| DbError::UnknownColumn(target.to_string()))?;
+                Some(actual.name.clone())
+            }
+            None => target_columns
                 .iter()
                 .find(|column| column.name.eq_ignore_ascii_case(source))
-            {
-                if used_targets.insert(target.name.to_ascii_lowercase()) {
-                    pairs.push((source.clone(), target.name.clone()));
-                }
-            }
-        }
-    } else {
-        for mapping in requested {
-            if !source_columns
-                .iter()
-                .any(|source| source == &mapping.source)
-            {
+                .map(|column| column.name.clone()),
+        };
+
+        if let Some(target) = target {
+            if !used_targets.insert(target.to_ascii_lowercase()) {
                 return Err(DbError::InvalidDesign(format!(
-                    "source column not found: {}",
-                    mapping.source
+                    "duplicate target column: {target}"
                 )));
             }
-            let Some(target) = mapping.target.as_deref() else {
-                continue;
-            };
-            if target.trim().is_empty() {
-                continue;
-            }
-            let actual = target_columns
-                .iter()
-                .find(|column| column.name.eq_ignore_ascii_case(target))
-                .ok_or_else(|| DbError::UnknownColumn(target.to_string()))?;
-            if !used_targets.insert(actual.name.to_ascii_lowercase()) {
-                return Err(DbError::InvalidDesign(format!(
-                    "duplicate target column: {}",
-                    actual.name
-                )));
-            }
-            pairs.push((mapping.source.clone(), actual.name.clone()));
+            pairs.push((source.clone(), target));
         }
     }
 
@@ -7006,6 +7029,72 @@ mod tests {
     }
 
     #[test]
+    fn import_mapping_overrides_without_disabling_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let (db, _) = Database::create(&db_path, false).unwrap();
+        db.create_table(&TableDesign {
+            name: "people".into(),
+            columns: vec![
+                ColumnDesign {
+                    ..column("name", "TEXT")
+                },
+                ColumnDesign {
+                    unique: true,
+                    ..column("domain", "TEXT")
+                },
+                ColumnDesign {
+                    ..column("city", "TEXT")
+                },
+            ],
+            index_foreign_keys: true,
+        })
+        .unwrap();
+
+        let files = tempfile::tempdir().unwrap();
+        let path = files.path().join("mapped.csv");
+        std::fs::write(&path, "domain,Full Name,city\nacme.test,Acme,Berlin\n").unwrap();
+
+        let result = db
+            .import_file(
+                &path,
+                &ImportRequest {
+                    table: Some("people".into()),
+                    create_table: false,
+                    format: ImportFormat::Csv,
+                    has_headers: true,
+                    delimiter: None,
+                    mapping: vec![
+                        ImportColumnMapping {
+                            source: "Full Name".into(),
+                            target: Some("name".into()),
+                        },
+                        ImportColumnMapping {
+                            source: "city".into(),
+                            target: None,
+                        },
+                    ],
+                    upsert_key: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result.rows, 1);
+        assert_eq!(result.ignored_columns, vec!["city".to_string()]);
+        let row = db
+            .query(
+                "SELECT name, city FROM people WHERE domain = 'acme.test'",
+                1,
+            )
+            .unwrap();
+        assert!(matches!(
+            &row.rows[0].cells[0],
+            CellValue::Text { value } if value == "Acme"
+        ));
+        assert!(matches!(row.rows[0].cells[1], CellValue::Null));
+    }
+
+    #[test]
     fn import_preserves_leading_zero_text() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("data.db");
@@ -7305,6 +7394,40 @@ mod tests {
         let result = db.delete_rows_expr("companies", &filter).unwrap();
         assert_eq!(result.affected, 2);
         assert_eq!(db.count_rows("companies", 10).unwrap().count, 1);
+    }
+
+    #[test]
+    fn filter_values_accept_json_scalars() {
+        let input: FilterInput =
+            serde_json::from_str(r#"{"column":"id","op":"eq","value":1}"#).unwrap();
+        match input.into_expr() {
+            FilterExpr::Condition { value, .. } => assert_eq!(value.as_deref(), Some("1")),
+            other => panic!("unexpected filter: {other:?}"),
+        }
+
+        let input: FilterInput = serde_json::from_str(
+            r#"{"type":"not","filter":{"type":"condition","column":"active","op":"eq","value":true}}"#,
+        )
+        .unwrap();
+        match input.into_expr() {
+            FilterExpr::Not { filter } => match *filter {
+                FilterExpr::Condition { value, .. } => assert_eq!(value.as_deref(), Some("1")),
+                other => panic!("unexpected filter: {other:?}"),
+            },
+            other => panic!("unexpected filter: {other:?}"),
+        }
+
+        let input: FilterInput =
+            serde_json::from_str(r#"{"column":"city","op":"is_null","value":null}"#).unwrap();
+        match input.into_expr() {
+            FilterExpr::Condition { value, .. } => assert_eq!(value, None),
+            other => panic!("unexpected filter: {other:?}"),
+        }
+
+        assert!(
+            serde_json::from_str::<FilterInput>(r#"{"column":"id","op":"eq","value":[1]}"#)
+                .is_err()
+        );
     }
 
     #[test]
