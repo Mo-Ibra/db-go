@@ -80,6 +80,27 @@ cargo install --path crates/cli
 ```
 
 That puts `dbgo` in `~/.cargo/bin`, which is already on `PATH` for Rust users.
+
+`cargo install` copies a compiled binary — it does **not** update automatically
+when you edit the source. After changing `crates/cli` or `crates/core`, reinstall:
+
+```bash
+cargo install --path crates/cli --force
+```
+
+For a fast development loop, run from the workspace instead:
+
+```bash
+cargo run -p db-go-cli -- tables ./samples/companies.db
+```
+
+Or build the debug binary and run it directly:
+
+```bash
+cargo build -p db-go-cli
+./target/debug/dbgo tables ./samples/companies.db
+```
+
 Then, from anywhere:
 
 ```bash
