@@ -32,6 +32,7 @@ What's here so far:
 - Query plan explorer with full-scan and index warnings
 - Clickable foreign-key navigation from row details
 - Table/index size stats and CSV/JSON result export
+- CSV/JSONL import with preview, column mapping, and create-table-from-file
 - Query history and read-only query results in the same grid
 - Click-to-sort columns, server-side filtering, and a row detail panel
 - Interactive ERD diagram: foreign-key edges, auto-layout, search, drag positions
@@ -116,6 +117,7 @@ dbgo explain ./samples/companies.db "select * from companies where domain = 'acm
 dbgo stats   ./samples/companies.db
 dbgo export  ./samples/companies.db companies --format csv --output companies.csv
 dbgo export  ./samples/companies.db --query "select * from companies" --format json --output companies.json
+dbgo import  ./database people --file people.csv --preview
 
 # project commands (run inside the project folder)
 cd database
@@ -135,6 +137,8 @@ dbgo update . companies --where '{"column":"id","op":"eq","value":1}' --set '{"c
 dbgo delete . companies --where '{"column":"id","op":"eq","value":1}' --yes
 dbgo sessions .
 dbgo backup .
+dbgo import . people --file people.csv
+dbgo import . --file people.csv --create-table
 dbgo backups .
 dbgo restore . --latest --yes
 # or restore one specific snapshot:
@@ -412,6 +416,36 @@ dbgo export . --query "select * from companies order by id" --format json --outp
 - BLOB values are base64-encoded.
 - Omitting `--output` writes data to stdout and the row count to stderr.
 
+## Import
+
+The header **Import** button opens a preview-first importer.
+
+- Choose CSV, JSON, or JSONL.
+- CSV supports headers/no headers and comma, semicolon, tab, or pipe delimiters.
+- Preview columns, inferred types, and the first rows before writing.
+- Import into an existing table with column mapping, or create a new table from
+  the file using inferred types.
+- Optional upsert key for existing tables.
+- Writes directly and does not create a backup automatically.
+- Unmapped source columns are ignored and reported.
+
+```bash
+dbgo import . people --file people.csv --preview
+dbgo import . people --file people.csv
+dbgo import . --file people.csv --create-table
+dbgo import . people --file people.csv --upsert-key domain
+dbgo import . people --file people.csv --map "Full Name=name"
+dbgo import . people --file people.csv --no-header --delimiter ';'
+```
+
+- Empty CSV cells become NULL.
+- JSON can be an object or an array of objects; JSONL is one object per line.
+- Default mapping matches source and target column names case-insensitively.
+- Upsert requires a PRIMARY KEY or UNIQUE constraint on the key column.
+- Column names are sanitized when creating a table from CSV headers.
+- Numeric-looking CSV columns with leading zeros are inferred as TEXT so values
+  like `00123` are preserved.
+
 ## Sort, filter, inspect
 
 - Click a column header to cycle ascending → descending → unsorted.
@@ -464,8 +498,8 @@ src/             React UI (Vite)
 
 ## Next
 
-- Postgres and MySQL drivers
 - D1 export and deploy
+- Postgres and MySQL drivers
 - Installers and release CI
 
 ## License

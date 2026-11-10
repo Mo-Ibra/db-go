@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::Path;
 
 use db_go_core::{
     AlterTableOp, BackupInfo, ColumnInfo, CountResult, Database, DatabaseStats, DbInfo, Direction,
-    ExportFormat, FilterSpec, ForeignKeyInfo, JsonObject, MigrateResult, MigrationInfo, Page,
-    QueryPlan, QueryResult, RestoreResult, RowUpdate, SchemaChange, SchemaGraph, SortSpec,
-    TableDesign, TableDetails, TableInfo, TableStats, WriteResult,
+    ExportFormat, FilterSpec, ForeignKeyInfo, ImportFormat, ImportPreview, ImportRequest,
+    ImportResult, JsonObject, MigrateResult, MigrationInfo, Page, QueryPlan, QueryResult,
+    RestoreResult, RowUpdate, SchemaChange, SchemaGraph, SortSpec, TableDesign, TableDetails,
+    TableInfo, TableStats, WriteResult,
 };
 use tauri::State;
 
@@ -505,6 +507,46 @@ pub async fn table_stats(table: String, state: State<'_, AppState>) -> Result<Ta
             .as_ref()
             .ok_or_else(|| "no database open".to_string())?;
         database.table_stats(&table).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn preview_import(
+    path: String,
+    format: ImportFormat,
+    has_headers: bool,
+    delimiter: Option<String>,
+) -> Result<ImportPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        db_go_core::preview_import(Path::new(&path), format, has_headers, delimiter.as_deref())
+            .map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn import_file(
+    path: String,
+    request: ImportRequest,
+    state: State<'_, AppState>,
+) -> Result<ImportResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<ImportResult, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let result = database
+            .import_file(Path::new(&path), &request)
+            .map_err(to_error)?;
+        eprintln!(
+            "[dbgo] imported {} row(s) into {} session={}",
+            result.rows, result.table, result.session_id
+        );
+        Ok(result)
     })
     .await
     .map_err(to_error)?

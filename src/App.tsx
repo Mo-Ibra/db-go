@@ -12,6 +12,7 @@ import type {
   FilterOp,
   FilterSpec,
   ForeignKeyInfo,
+  ImportResult,
   JsonObject,
   MigrationInfo,
   Page,
@@ -34,6 +35,7 @@ import { StructureView } from "./components/StructureView";
 import { AlterTableDialog } from "./components/AlterTableDialog";
 import { MigrationsDialog } from "./components/MigrationsDialog";
 import { BackupsDialog } from "./components/BackupsDialog";
+import { ImportDialog } from "./components/ImportDialog";
 import { QueryPlanPanel } from "./components/QueryPlanPanel";
 import { TableDesigner } from "./components/TableDesigner";
 import { cn } from "./lib/cn";
@@ -293,6 +295,7 @@ export default function App() {
   const [migrationsApplying, setMigrationsApplying] = useState(false);
   const [migrationsError, setMigrationsError] = useState<string | null>(null);
   const [showBackups, setShowBackups] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [backupsLoading, setBackupsLoading] = useState(false);
   const [backupsError, setBackupsError] = useState<string | null>(null);
@@ -893,6 +896,7 @@ export default function App() {
     setMigrationsApplying(false);
     setMigrationsLoading(false);
     setShowBackups(false);
+    setShowImport(false);
     setBackups([]);
     setBackupsError(null);
     setBackupsLoading(false);
@@ -1598,6 +1602,28 @@ export default function App() {
     }
   }, [creatingBackup, restoringBackup, loadBackups]);
 
+  const requestImport = useCallback(() => {
+    if (guardPending()) return;
+    setShowImport(true);
+  }, [guardPending]);
+
+  const handleImported = useCallback(
+    async (result: ImportResult) => {
+      setShowImport(false);
+      const ignored =
+        result.ignored_columns.length > 0
+          ? ` · ignored ${result.ignored_columns.join(", ")}`
+          : "";
+      const created = result.created_table ? " · created table" : "";
+      await refreshAfterSchemaChange(
+        result.table,
+        `Imported ${result.rows.toLocaleString()} row(s) into ${result.table} · session ${result.session_id}${created}${ignored}`,
+      );
+      openReferencedTable(result.table);
+    },
+    [refreshAfterSchemaChange, openReferencedTable],
+  );
+
   const handleRestoreBackup = useCallback(
     async (backup: BackupInfo) => {
       if (guardPending()) return;
@@ -1983,6 +2009,16 @@ export default function App() {
               title="Browse and restore backups"
             >
               Backups
+            </button>
+          )}
+          {db && (
+            <button
+              className={BTN_GHOST}
+              onClick={requestImport}
+              disabled={loading || restoringBackup !== null || creatingBackup}
+              title="Import CSV, JSON, or JSONL"
+            >
+              Import
             </button>
           )}
           <button className={BTN_GHOST} onClick={() => void createNewDatabase()}>
@@ -2839,6 +2875,15 @@ export default function App() {
         onRefresh={() => void loadBackups()}
         onCreateBackup={() => void handleCreateBackup()}
         onRestore={(backup) => void handleRestoreBackup(backup)}
+      />
+
+      <ImportDialog
+        open={showImport}
+        tables={tables}
+        schema={schema}
+        selectedTable={selected}
+        onClose={() => setShowImport(false)}
+        onImported={handleImported}
       />
 
       <TableDesigner

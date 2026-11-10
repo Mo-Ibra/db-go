@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use db_go_core::{
-    AlterTableOp, BackupInfo, CellValue, ColumnDesign, ColumnInfo, CountResult, Database,
-    DatabaseStats, Direction, ExportFormat, FilterSpec, IndexInfo, JsonObject, MigrateResult,
+    preview_import, AlterTableOp, BackupInfo, CellValue, ColumnDesign, ColumnInfo, CountResult,
+    Database, DatabaseStats, Direction, ExportFormat, FilterSpec, ImportColumnMapping,
+    ImportFormat, ImportPreview, ImportRequest, ImportResult, IndexInfo, JsonObject, MigrateResult,
     MigrationInfo, Page, QueryPlan, QueryResult, RestoreResult, SchemaChange, SchemaGraph,
     SessionSummary, SortDirection, SortSpec, TableDesign, TableInfo, ViewInfo, WriteResult,
 };
@@ -218,6 +219,37 @@ enum Command {
         #[arg(long, value_name = "COLUMN:ASC|DESC", help = "Sort for a table export")]
         sort: Option<String>,
     },
+
+    /// Import CSV, JSON, or JSONL data.
+    Import {
+        db: PathBuf,
+        #[arg(help = "Target table; defaults to the file name when creating")]
+        table: Option<String>,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(
+            long,
+            value_enum,
+            help = "Inferred from the file extension when omitted"
+        )]
+        format: Option<ImportFormatArg>,
+        #[arg(long, help = "Create the target table from the file")]
+        create_table: bool,
+        #[arg(long = "no-header", help = "CSV has no header row")]
+        no_header: bool,
+        #[arg(long, help = "CSV delimiter: one character or \\t")]
+        delimiter: Option<String>,
+        #[arg(
+            long = "map",
+            value_name = "SOURCE=TARGET",
+            help = "Map a source column"
+        )]
+        mappings: Vec<String>,
+        #[arg(long, help = "Upsert using this target key column")]
+        upsert_key: Option<String>,
+        #[arg(long, help = "Preview columns, types, and rows without writing")]
+        preview: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -277,6 +309,23 @@ enum DirectionArg {
 enum ExportFormatArg {
     Csv,
     Json,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ImportFormatArg {
+    Csv,
+    Json,
+    Jsonl,
+}
+
+impl From<ImportFormatArg> for ImportFormat {
+    fn from(value: ImportFormatArg) -> Self {
+        match value {
+            ImportFormatArg::Csv => ImportFormat::Csv,
+            ImportFormatArg::Json => ImportFormat::Json,
+            ImportFormatArg::Jsonl => ImportFormat::Jsonl,
+        }
+    }
 }
 
 impl From<ExportFormatArg> for ExportFormat {
@@ -654,6 +703,61 @@ fn run(cli: Cli) -> Result<(), String> {
             }
             Ok(())
         }
+        Command::Import {
+            db,
+            table,
+            file,
+            format,
+            create_table,
+            no_header,
+            delimiter,
+            mappings,
+            upsert_key,
+            preview,
+        } => {
+            let format = match format {
+                Some(format) => format.into(),
+                None => infer_import_format(&file)?,
+            };
+            if preview {
+                let preview =
+                    preview_import(&file, format, !no_header, delimiter.as_deref()).map_err(err)?;
+                return output_import_preview(&preview, cli.json, cli.jsonl);
+            }
+
+            let mapping = mappings
+                .iter()
+                .map(|spec| {
+                    let (source, target) = spec
+                        .split_once('=')
+                        .map(|(source, target)| (source, Some(target)))
+                        .unwrap_or((spec.as_str(), Some(spec.as_str())));
+                    ImportColumnMapping {
+                        source: source.trim().to_string(),
+                        target: target.and_then(|target| {
+                            let target = target.trim();
+                            if target.is_empty() {
+                                None
+                            } else {
+                                Some(target.to_string())
+                            }
+                        }),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let request = ImportRequest {
+                table,
+                create_table,
+                format,
+                has_headers: !no_header,
+                delimiter,
+                mapping,
+                upsert_key,
+            };
+            let database = open(&db)?;
+            let result = database.import_file(&file, &request).map_err(err)?;
+            output_import_result(&result, cli.json, cli.jsonl)
+        }
     }
 }
 
@@ -662,6 +766,22 @@ fn open(path: &Path) -> Result<Database, String> {
         return Err(format!("database or project not found: {}", path.display()));
     }
     Database::open_project(path).map_err(err)
+}
+
+fn infer_import_format(path: &Path) -> Result<ImportFormat, String> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("csv") => Ok(ImportFormat::Csv),
+        Some("json") => Ok(ImportFormat::Json),
+        Some("jsonl") | Some("ndjson") => Ok(ImportFormat::Jsonl),
+        Some(other) => Err(format!(
+            "cannot infer import format from .{other}; use --format"
+        )),
+        None => Err("cannot infer import format; use --format".to_string()),
+    }
 }
 
 fn output_tables(tables: &[TableInfo], json: bool, jsonl: bool) -> Result<(), String> {
@@ -1152,6 +1272,99 @@ fn output_plan(plan: &QueryPlan, json: bool, jsonl: bool) -> Result<(), String> 
         plan.full_scans,
         plan.indexes_used
     ))
+}
+
+fn output_import_preview(preview: &ImportPreview, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(preview);
+    }
+    if jsonl {
+        return write_jsonl(&preview.rows);
+    }
+
+    print_line(&format!(
+        "{} · {} row(s) · suggested table {}",
+        import_format_label(preview.format),
+        preview.total_rows,
+        preview.suggested_table
+    ))?;
+
+    let mut columns = human_table();
+    columns.set_header(vec!["source", "suggested", "type"]);
+    for column in &preview.columns {
+        columns.add_row(vec![
+            column.source.clone(),
+            column.suggested_name.clone(),
+            column.inferred_type.clone(),
+        ]);
+    }
+    print_table(columns)?;
+
+    if !preview.rows.is_empty() {
+        let mut rows = human_table();
+        rows.set_header(
+            preview
+                .columns
+                .iter()
+                .map(|column| column.source.clone())
+                .collect::<Vec<_>>(),
+        );
+        for row in &preview.rows {
+            rows.add_row(
+                preview
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        row.get(&column.source)
+                            .map(json_value_text)
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        print_table(rows)?;
+    }
+    Ok(())
+}
+
+fn output_import_result(result: &ImportResult, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(result);
+    }
+    if jsonl {
+        return write_jsonl(std::slice::from_ref(result));
+    }
+
+    let mut message = format!(
+        "imported {} row(s) into {} · session {}",
+        result.rows, result.table, result.session_id
+    );
+    if result.created_table {
+        message.push_str(" · created table");
+    }
+    if !result.ignored_columns.is_empty() {
+        message.push_str(&format!(
+            " · ignored source columns: {}",
+            result.ignored_columns.join(", ")
+        ));
+    }
+    print_line(&message)
+}
+
+fn import_format_label(format: ImportFormat) -> &'static str {
+    match format {
+        ImportFormat::Csv => "CSV",
+        ImportFormat::Json => "JSON",
+        ImportFormat::Jsonl => "JSONL",
+    }
+}
+
+fn json_value_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::String(text) => truncate(text, 80),
+        other => truncate(&other.to_string(), 80),
+    }
 }
 
 fn output_stats(stats: &DatabaseStats, json: bool, jsonl: bool) -> Result<(), String> {

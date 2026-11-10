@@ -92,6 +92,46 @@ export type ExportResponse = {
   rows: number;
 };
 
+export type ImportFormat = "csv" | "json" | "jsonl";
+
+export type ImportColumnMapping = {
+  source: string;
+  target: string | null;
+};
+
+export type ImportRequest = {
+  table: string | null;
+  create_table: boolean;
+  format: ImportFormat;
+  has_headers: boolean;
+  delimiter: string | null;
+  mapping: ImportColumnMapping[];
+  upsert_key: string | null;
+};
+
+export type ImportColumn = {
+  source: string;
+  suggested_name: string;
+  inferred_type: string;
+};
+
+export type ImportPreview = {
+  format: ImportFormat;
+  columns: ImportColumn[];
+  rows: JsonObject[];
+  total_rows: number;
+  suggested_table: string;
+  source_path: string;
+};
+
+export type ImportResult = {
+  table: string;
+  rows: number;
+  session_id: string;
+  created_table: boolean;
+  ignored_columns: string[];
+};
+
 export type SchemaMap = Record<string, string[]>;
 
 export type SchemaColumn = {

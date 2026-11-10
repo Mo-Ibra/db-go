@@ -29,6 +29,8 @@ pub fn run() {
             commands::explain_query,
             commands::database_stats,
             commands::table_stats,
+            commands::preview_import,
+            commands::import_file,
             commands::export_data,
             commands::save_changes,
             commands::close_database,

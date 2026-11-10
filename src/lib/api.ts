@@ -10,6 +10,10 @@ import type {
   ExportResponse,
   FilterSpec,
   ForeignKeyInfo,
+  ImportFormat,
+  ImportPreview,
+  ImportRequest,
+  ImportResult,
   JsonObject,
   MigrationInfo,
   MigrateResult,
@@ -77,6 +81,20 @@ export const api = {
     format: ExportFormat;
     path: string;
   }) => invoke<ExportResponse>("export_data", args),
+  previewImport: (
+    path: string,
+    format: ImportFormat,
+    hasHeaders: boolean,
+    delimiter: string | null,
+  ) =>
+    invoke<ImportPreview>("preview_import", {
+      path,
+      format,
+      hasHeaders,
+      delimiter,
+    }),
+  importFile: (path: string, request: ImportRequest) =>
+    invoke<ImportResult>("import_file", { path, request }),
   loadTablePage: (
     table: string,
     filter: FilterSpec | null,
