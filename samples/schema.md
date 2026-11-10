@@ -16,6 +16,7 @@
 | notes | TEXT |  |
 | logo | BLOB |  |
 | updated_at | TEXT | NOT NULL |
+| das | TEXT | NOT NULL |
 
 ## links
 

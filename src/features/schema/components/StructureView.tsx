@@ -82,7 +82,7 @@ function IndexRow({
       {index.sql ? (
         <button
           type="button"
-          className="inline-flex h-6 flex-none items-center rounded-md border border-danger/30 px-2 text-[10.5px] font-medium text-[#fca5a5] hover:border-danger/60 hover:bg-danger/10 disabled:cursor-default disabled:opacity-40"
+          className="inline-flex h-6 flex-none items-center rounded-md border border-danger/30 px-2 text-[10.5px] font-medium text-[#f85149] hover:border-danger/60 hover:bg-danger/10 disabled:cursor-default disabled:opacity-40"
           onClick={() => onDrop(index.name)}
           disabled={busy}
         >
@@ -205,7 +205,7 @@ export function StructureView({
         </div>
 
         {actionError && (
-          <div className="rounded-md border border-danger/25 bg-danger/10 px-3 py-2 font-mono text-[11px] text-[#fecaca]">
+          <div className="rounded-md border border-danger/25 bg-danger/10 px-3 py-2 font-mono text-[11px] text-[#f85149]">
             {actionError}
           </div>
         )}
@@ -258,7 +258,7 @@ export function StructureView({
               {copied ? "Copied" : "Copy DDL"}
             </button>
           </div>
-          <pre className="max-h-[220px] overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-ink p-3 font-mono text-[11.5px] leading-relaxed text-[#cbd5e1]">
+          <pre className="max-h-[220px] overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-ink p-3 font-mono text-[11.5px] leading-relaxed text-[#e6edf3]">
             {details.ddl || "-- no DDL"}
           </pre>
         </section>
@@ -298,7 +298,7 @@ export function StructureView({
                           .map((foreignKey) => (
                             <span
                               key={`${column.name}-${foreignKey.referenced_table}`}
-                              className="rounded-full border border-[#60a5fa]/30 bg-[#60a5fa]/10 px-1.5 py-0.5 text-[9.5px] text-[#93c5fd]"
+                              className="rounded-full border border-[#79c0ff]/30 bg-[#79c0ff]/10 px-1.5 py-0.5 text-[9.5px] text-[#79c0ff]"
                               title={`${foreignKey.referenced_table}.${foreignKey.referenced_column}`}
                             >
                               FK

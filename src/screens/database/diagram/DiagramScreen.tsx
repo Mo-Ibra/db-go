@@ -13,10 +13,12 @@ export function DiagramScreen() {
   const {
     db,
     schemaGraph,
+    selected,
     guardPending,
     setView,
     loadTable,
     requestDesigner,
+    requestAlterTable,
   } = useWorkspace();
 
   return (
@@ -48,6 +50,8 @@ export function DiagramScreen() {
               void loadTable(table, null);
             }}
             onCreateTable={requestDesigner}
+            onEditTable={requestAlterTable}
+            canEditTable={Boolean(selected)}
           />
         </Suspense>
       )}

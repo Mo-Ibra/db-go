@@ -38,7 +38,7 @@ export function QueryPlanPanel({ plan, onClose }: QueryPlanPanelProps) {
             className={cn(
               "rounded-full border px-1.5 py-0.5 text-[10px] font-semibold",
               plan.full_scans > 0
-                ? "border-danger/30 bg-danger/10 text-[#fca5a5]"
+                ? "border-danger/30 bg-danger/10 text-[#f85149]"
                 : "border-accent/30 bg-accent/10 text-accent",
             )}
           >
@@ -92,9 +92,9 @@ export function QueryPlanPanel({ plan, onClose }: QueryPlanPanelProps) {
                     className={cn(
                       "px-2 py-1.5 font-mono text-[11px]",
                       step.full_scan
-                        ? "text-[#fca5a5]"
+                        ? "text-[#f85149]"
                         : step.uses_index
-                          ? "text-[#b8fff4]"
+                          ? "text-[#7ee787]"
                           : "text-fg",
                     )}
                     style={{ paddingLeft: 8 + planDepth(step, byId) * 16 }}

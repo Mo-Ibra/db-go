@@ -17,7 +17,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
-import { LayoutGrid, Maximize2, Plus } from "lucide-react";
+import { LayoutGrid, Maximize2, Pencil, Plus } from "lucide-react";
 import type { SchemaGraph, SchemaTable } from "@/types";
 import { Button } from "@/components/ui/Button";
 
@@ -33,6 +33,8 @@ type DiagramViewProps = {
   dbPath: string;
   onOpenTable: (table: string) => void;
   onCreateTable: () => void;
+  onEditTable: () => void;
+  canEditTable: boolean;
 };
 
 type StoredPositions = Record<string, { x: number; y: number }>;
@@ -193,18 +195,18 @@ function buildLayout(
       type: "smoothstep",
       markerEnd: {
         type: MarkerType.ArrowClosed,
-        color: "#2dd4bf",
+        color: "#3fb950",
         width: 14,
         height: 14,
       },
-      style: { stroke: "#2dd4bf", strokeWidth: 1.5 },
+      style: { stroke: "#3fb950", strokeWidth: 1.5 },
       label: `${relationship.from_column} → ${relationship.to_column}`,
       labelStyle: {
-        fill: "#7c8b9b",
+        fill: "#8b949e",
         fontSize: 9,
         fontFamily: "monospace",
       },
-      labelBgStyle: { fill: "#0f1317", fillOpacity: 0.92 },
+      labelBgStyle: { fill: "#11161d", fillOpacity: 0.92 },
       labelBgPadding: [4, 2],
       labelBgBorderRadius: 4,
     });
@@ -242,6 +244,8 @@ export function DiagramView({
   dbPath,
   onOpenTable,
   onCreateTable,
+  onEditTable,
+  canEditTable,
 }: DiagramViewProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<TableNodeType>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -301,13 +305,9 @@ export function DiagramView({
         <p className="max-w-[420px] text-[13px] leading-relaxed text-muted">
           Create a table and its relationships will appear here.
         </p>
-        <button
-          type="button"
-          className="inline-flex h-[38px] items-center justify-center rounded-[7px] border border-[#14b8a6] bg-linear-to-b from-accent to-[#14b8a6] px-5 text-[13px] font-bold text-[#03110f] hover:brightness-110"
-          onClick={onCreateTable}
-        >
+        <Button variant="primary" size="lg" icon={Plus} onClick={onCreateTable}>
           Create your first table
-        </button>
+        </Button>
       </div>
     );
   }
@@ -335,11 +335,11 @@ export function DiagramView({
           variant={BackgroundVariant.Dots}
           gap={20}
           size={1}
-          color="#1f2933"
+          color="#26303b"
         />
         <Controls />
         <MiniMap
-          nodeColor="#1a222b"
+          nodeColor="#1c2530"
           maskColor="rgba(10,12,15,0.72)"
           className="overflow-hidden rounded-lg border border-line"
         />
@@ -369,6 +369,16 @@ export function DiagramView({
             onClick={() => flow?.fitView({ padding: 0.2, duration: 300 })}
           >
             Fit view
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={Pencil}
+            onClick={onEditTable}
+            disabled={!canEditTable}
+            title="Edit the selected table's columns"
+          >
+            Edit table
           </Button>
           <Button
             variant="secondary"

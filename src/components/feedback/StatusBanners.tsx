@@ -25,14 +25,14 @@ export function StatusBanners() {
   return (
     <>
       {error ? (
-        <div className="flex flex-none items-center justify-between gap-3 border-b border-danger/25 bg-danger/10 px-3.5 py-2 font-mono text-[11.5px] text-[#fecaca]">
+        <div className="flex flex-none items-center justify-between gap-3 border-b border-danger/25 bg-danger/10 px-3.5 py-2 font-mono text-[11.5px] text-[#f85149]">
           <span>{error}</span>
           <IconButton icon={X} label="Dismiss error" size="sm" onClick={() => setError(null)} />
         </div>
       ) : null}
 
       {notice ? (
-        <div className="flex flex-none items-center justify-between gap-3 border-b border-accent/25 bg-accent/10 px-3.5 py-2 font-mono text-[11.5px] text-[#b8fff4]">
+        <div className="flex flex-none items-center justify-between gap-3 border-b border-accent/25 bg-accent/10 px-3.5 py-2 font-mono text-[11.5px] text-[#7ee787]">
           <span>{notice}</span>
           <IconButton icon={X} label="Dismiss notice" size="sm" onClick={() => setNotice(null)} />
         </div>
@@ -45,7 +45,7 @@ export function StatusBanners() {
         >
           <div className="flex min-w-0 items-center gap-2.5">
             <span className="h-1.5 w-1.5 flex-none rounded-full bg-accent shadow-[0_0_8px_rgba(45,212,191,0.7)]" />
-            <span className="whitespace-nowrap font-mono text-[11.5px] font-semibold text-[#b8fff4]">
+            <span className="whitespace-nowrap font-mono text-[11.5px] font-semibold text-[#7ee787]">
               {pendingCount} unsaved change{pendingCount === 1 ? "" : "s"}
               {selected ? ` on ${selected}` : ""}
             </span>

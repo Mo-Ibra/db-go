@@ -70,16 +70,16 @@ export function D1ExportDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-auto bg-black/65 p-4 backdrop-blur-md"
       onClick={(event) => {
         if (event.target === event.currentTarget && !exporting) onClose();
       }}
     >
       <div
         data-testid="d1-export-dialog"
-        className="w-full max-w-[680px] rounded-xl border border-line bg-panel shadow-2xl"
         role="dialog"
         aria-modal="true"
+        className="modal-panel w-full max-w-[680px] rounded-xl border border-line bg-panel shadow-2xl"
         aria-label="D1 export"
       >
         <div className="flex items-center justify-between border-b border-line px-5 py-3">
@@ -156,7 +156,7 @@ export function D1ExportDialog({
           </div>
 
           {error && (
-            <div className="mt-3 rounded-md border border-danger/25 bg-danger/10 px-3 py-2 font-mono text-[11px] text-[#fecaca]">
+            <div className="mt-3 rounded-md border border-danger/25 bg-danger/10 px-3 py-2 font-mono text-[11px] text-[#f85149]">
               {error}
             </div>
           )}

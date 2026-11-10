@@ -1,20 +1,20 @@
 @import "tailwindcss";
 
 @theme {
-  --color-ink: #0a0c0f;
-  --color-panel: #0f1317;
-  --color-panel-2: #141a20;
-  --color-panel-3: #1a222b;
-  --color-line: #1f2933;
-  --color-line-strong: #2a3744;
-  --color-fg: #dbe4ee;
-  --color-muted: #7c8b9b;
-  --color-muted-2: #55636f;
-  --color-accent: #2dd4bf;
-  --color-accent-2: #38bdf8;
-  --color-danger: #f87171;
-  --color-int: #7dd3fc;
-  --color-blob: #c4b5fd;
+  --color-ink: #0b0f14;
+  --color-panel: #11161d;
+  --color-panel-2: #161d26;
+  --color-panel-3: #1c2530;
+  --color-line: #26303b;
+  --color-line-strong: #34404d;
+  --color-fg: #e6edf3;
+  --color-muted: #8b949e;
+  --color-muted-2: #5c6773;
+  --color-accent: #3fb950;
+  --color-accent-2: #56d364;
+  --color-danger: #f85149;
+  --color-int: #79c0ff;
+  --color-blob: #d2a8ff;
 
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
@@ -22,6 +22,10 @@
 }
 
 @layer base {
+  :root {
+    color-scheme: dark;
+  }
+
   html,
   body,
   #root {
@@ -30,15 +34,25 @@
 
   body {
     @apply overflow-hidden bg-ink font-sans text-[13px] text-fg antialiased;
-    background-image:
-      radial-gradient(1200px 600px at 20% -10%, rgba(45, 212, 191, 0.06), transparent 60%),
-      radial-gradient(900px 500px at 100% 0%, rgba(56, 189, 248, 0.05), transparent 55%);
+    background: var(--color-ink);
   }
 
   button,
   input,
-  select {
+  select,
+  textarea {
     font: inherit;
+  }
+
+  select,
+  option {
+    background-color: var(--color-panel-2);
+    color: var(--color-fg);
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-muted-2);
   }
 
   button {
@@ -46,7 +60,7 @@
   }
 
   ::selection {
-    background: rgba(45, 212, 191, 0.3);
+    background: rgba(63, 185, 80, 0.3);
   }
 
   ::-webkit-scrollbar {
@@ -55,13 +69,13 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    background: #25313c;
-    border: 2px solid #0a0c0f;
+    background: #34404d;
+    border: 2px solid #0b0f14;
     border-radius: 6px;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: #33424f;
+    background: #3a4a5a;
   }
 
   ::-webkit-scrollbar-track {
@@ -70,28 +84,43 @@
 }
 
 @layer components {
+  .modal-panel {
+    animation: modal-in 160ms ease-out;
+  }
+
+  @keyframes modal-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
   .btn {
-    @apply inline-flex h-8 items-center justify-center rounded-md border px-3 text-[12px] font-medium transition-colors disabled:cursor-default disabled:opacity-40;
+    @apply inline-flex h-8 items-center justify-center rounded-md border px-3 text-[12px] font-medium shadow-sm transition-all active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default disabled:opacity-40 disabled:shadow-none;
   }
 
   .btn-neutral {
-    @apply border-line-strong bg-panel-2 text-fg hover:border-[#3a4a5a] hover:bg-panel-3;
+    @apply border-line-strong bg-panel-3/70 text-fg hover:border-[#3a4a5a] hover:bg-panel-3;
   }
 
   .btn-primary {
-    @apply border-[#14b8a6] bg-linear-to-b from-accent to-[#14b8a6] font-bold text-[#03110f] hover:brightness-110;
+    @apply border-[#2ea043] bg-[#238636] font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] hover:border-[#3fb950] hover:bg-[#2ea043];
   }
 
   .btn-ghost {
-    @apply border-transparent bg-transparent text-fg hover:border-line-strong hover:bg-panel-2;
+    @apply border-transparent bg-transparent text-muted hover:border-line-strong hover:bg-panel-2 hover:text-fg;
   }
 
   .field-input {
-    @apply h-8 rounded-md border border-line bg-ink px-2 text-xs text-fg outline-none placeholder:text-muted-2 focus:border-accent disabled:opacity-40;
+    @apply h-8 rounded-md border border-line bg-ink px-2 text-xs text-fg outline-none placeholder:text-muted-2 focus:border-accent focus:ring-2 focus:ring-accent/15 disabled:opacity-40;
   }
 
   .field-select {
-    @apply h-8 rounded-md border border-line bg-panel-2 px-1.5 text-xs text-fg outline-none focus:border-accent disabled:opacity-40;
+    @apply h-8 rounded-md border border-line bg-panel-2 px-1.5 text-xs text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/15 disabled:opacity-40;
   }
 
   .field-label {
@@ -99,7 +128,7 @@
   }
 
   .card {
-    @apply rounded-lg border border-line bg-ink/40 p-3;
+    @apply rounded-xl border border-line bg-panel-2/60 p-4 shadow-sm;
   }
 
   .react-flow__controls {

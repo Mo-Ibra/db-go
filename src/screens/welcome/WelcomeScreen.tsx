@@ -1,4 +1,5 @@
 import { Database, FolderOpen, HardDrive, Plus, X } from "lucide-react";
+import logo from "@/assets/dbgo-logo.png";
 import type { useDatabaseSession } from "@/features/connection/hooks/useDatabaseSession";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
@@ -22,9 +23,7 @@ export function WelcomeScreen({ session }: { session: DatabaseSession }) {
   return (
     <div className="flex h-screen flex-col bg-ink">
       <header className="flex h-[52px] flex-none items-center gap-2.5 border-b border-line px-4">
-        <div className="grid h-7 w-7 place-items-center rounded-lg bg-linear-to-br from-accent to-accent-2 text-[11px] font-extrabold tracking-tight text-[#04110f]">
-          DB
-        </div>
+        <img src={logo} alt="DBGo" className="h-10 w-10 object-contain" />
         <div className="font-bold tracking-tight">DBGo</div>
         <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-2">
           local SQL workbench
@@ -34,9 +33,11 @@ export function WelcomeScreen({ session }: { session: DatabaseSession }) {
       <main className="flex min-h-0 flex-1 items-start justify-center overflow-auto px-6 py-14">
         <div className="w-full max-w-[620px]">
           <div className="mb-8 flex flex-col items-center text-center">
-            <div className="grid h-[58px] w-[58px] place-items-center rounded-[16px] bg-linear-to-br from-accent to-accent-2 text-[#04110f] shadow-[0_14px_40px_rgba(45,212,191,0.25)]">
-              <Database size={28} strokeWidth={1.8} />
-            </div>
+            <img
+              src={logo}
+              alt="DBGo"
+              className="h-[96px] w-[96px] object-contain"
+            />
             <h1 className="mt-4 text-[24px] tracking-tight">Your local SQL workbench</h1>
             <p className="mt-1 max-w-[440px] text-[13px] leading-relaxed text-muted">
               Open an existing SQLite database or create a project to start exploring

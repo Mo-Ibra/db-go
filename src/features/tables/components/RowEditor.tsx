@@ -94,15 +94,15 @@ export function RowEditor({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-auto bg-black/65 p-4 backdrop-blur-md"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
       <div
-        className="w-full max-w-[620px] rounded-xl border border-line bg-panel shadow-2xl"
         role="dialog"
         aria-modal="true"
+        className="modal-panel w-full max-w-[620px] rounded-xl border border-line bg-panel shadow-2xl"
         aria-label={mode === "insert" ? "New row" : "Edit row"}
       >
         <div className="flex items-center justify-between border-b border-line px-5 py-3">
@@ -183,7 +183,7 @@ export function RowEditor({
           </div>
 
           {error && (
-            <div className="mt-3 rounded-md border border-danger/25 bg-danger/10 px-3 py-2 text-[11px] text-[#fecaca]">
+            <div className="mt-3 rounded-md border border-danger/25 bg-danger/10 px-3 py-2 text-[11px] text-[#f85149]">
               {error}
             </div>
           )}
@@ -200,7 +200,7 @@ export function RowEditor({
           <button
             type="button"
             data-testid="row-editor-submit"
-            className="inline-flex h-8 items-center justify-center rounded-md border border-[#14b8a6] bg-linear-to-b from-accent to-[#14b8a6] px-3 text-[12px] font-bold text-[#03110f] hover:brightness-110"
+            className="inline-flex h-8 items-center justify-center rounded-md border border-accent bg-accent px-3 text-[12px] font-bold text-[#0b0f14] hover:bg-[#56d364]"
             onClick={handleSubmit}
           >
             {mode === "insert" ? "Add to changes" : "Update changes"}

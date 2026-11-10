@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Upload,
 } from "lucide-react";
+import logo from "@/assets/dbgo-logo.png";
 import { useWorkspace } from "@/app/providers/WorkspaceContext";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
@@ -43,9 +44,11 @@ export function AppHeader() {
   return (
     <header className="flex h-[52px] flex-none items-center justify-between border-b border-line bg-ink/80 px-4 backdrop-blur-xl">
       <div className="flex items-center gap-2.5">
-        <div className="grid h-7 w-7 place-items-center rounded-lg bg-linear-to-br from-accent to-accent-2 text-[11px] font-extrabold tracking-tight text-[#04110f] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_6px_18px_rgba(45,212,191,0.25)]">
-          DB
-        </div>
+        <img
+          src={logo}
+          alt="DBGo"
+          className="h-10 w-10 object-contain"
+        />
         <div className="font-bold tracking-tight">DBGo</div>
         <span className="ml-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-2">
           local SQL workbench

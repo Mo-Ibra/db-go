@@ -7,13 +7,13 @@ type ButtonSize = "sm" | "md" | "lg";
 
 const variants: Record<ButtonVariant, string> = {
   primary:
-    "border-[#14b8a6] bg-linear-to-b from-accent to-[#14b8a6] font-bold text-[#03110f] hover:brightness-110",
+    "border-[#2ea043] bg-[#238636] font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] hover:border-[#3fb950] hover:bg-[#2ea043]",
   secondary:
-    "border-line-strong bg-panel-2 text-fg hover:border-[#3a4a5a] hover:bg-panel-3",
+    "border-line-strong bg-panel-3/70 text-fg hover:border-[#3a4a5a] hover:bg-panel-3",
   ghost:
-    "border-transparent bg-transparent text-fg hover:border-line-strong hover:bg-panel-2",
+    "border-transparent bg-transparent text-muted hover:border-line-strong hover:bg-panel-2 hover:text-fg",
   danger:
-    "border-danger/35 bg-danger/10 text-[#fca5a5] hover:border-danger/60 hover:bg-danger/15",
+    "border-danger/35 bg-danger/10 text-[#f85149] hover:border-danger/60 hover:bg-danger/15",
 };
 
 const sizes: Record<ButtonSize, string> = {
@@ -44,7 +44,7 @@ export function Button({
     <button
       type={type}
       className={cn(
-        "inline-flex items-center justify-center gap-1.5 rounded-[7px] border font-medium transition-colors disabled:cursor-default disabled:opacity-40",
+        "inline-flex items-center justify-center gap-1.5 rounded-[7px] border font-medium shadow-sm transition-all active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default disabled:opacity-40 disabled:shadow-none",
         variants[variant],
         sizes[size],
         className,

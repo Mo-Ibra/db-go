@@ -32,7 +32,7 @@ export function NavigationRail() {
             className={cn(
               "grid h-9 w-9 place-items-center rounded-lg border transition-colors",
               active
-                ? "border-accent/30 bg-accent/10 text-[#b8fff4]"
+                ? "border-accent/30 bg-accent/10 text-[#7ee787]"
                 : "border-transparent text-muted-2 hover:border-line-strong hover:bg-panel-2 hover:text-fg",
             )}
           >

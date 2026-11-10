@@ -9,9 +9,9 @@ const tones: Record<BadgeTone, string> = {
   subtle:
     "border-line/70 bg-transparent text-muted",
   accent:
-    "border-accent/30 bg-accent/10 text-[#b8fff4]",
+    "border-accent/30 bg-accent/10 text-[#7ee787]",
   danger:
-    "border-danger/30 bg-danger/10 text-[#fca5a5]",
+    "border-danger/30 bg-danger/10 text-[#f85149]",
 };
 
 export function Badge({

@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Download, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, Pencil, Plus } from "lucide-react";
 import type { ExportFormat } from "@/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -26,6 +26,7 @@ export function ViewToolbar() {
     prevPage,
     changePageSize,
     setRowEditor,
+    requestAlterTable,
     tableDetails,
     exportCurrent,
   } = useWorkspace();
@@ -69,6 +70,16 @@ export function ViewToolbar() {
       </div>
 
       <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={Pencil}
+          onClick={requestAlterTable}
+          disabled={!selected}
+          title="Add, rename, or drop columns"
+        >
+          Edit columns
+        </Button>
         {view === "data" ? (
           <>
             <Button

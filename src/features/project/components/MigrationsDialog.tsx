@@ -30,15 +30,15 @@ export function MigrationsDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-auto bg-black/65 p-4 backdrop-blur-md"
       onClick={(event) => {
         if (event.target === event.currentTarget && !applying) onClose();
       }}
     >
       <div
-        className="w-full max-w-[780px] rounded-xl border border-line bg-panel shadow-2xl"
         role="dialog"
         aria-modal="true"
+        className="modal-panel w-full max-w-[780px] rounded-xl border border-line bg-panel shadow-2xl"
         aria-label="Migrations"
       >
         <div className="flex items-center justify-between border-b border-line px-5 py-3">
@@ -85,7 +85,7 @@ export function MigrationsDialog({
           </div>
 
           {error && (
-            <div className="mb-3 rounded-md border border-danger/25 bg-danger/10 px-3 py-2 font-mono text-[11px] text-[#fecaca]">
+            <div className="mb-3 rounded-md border border-danger/25 bg-danger/10 px-3 py-2 font-mono text-[11px] text-[#f85149]">
               {error}
             </div>
           )}

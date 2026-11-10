@@ -3,6 +3,8 @@ import { basicSetup } from "codemirror";
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, placeholder } from "@codemirror/view";
 import { sql } from "@codemirror/lang-sql";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { tags } from "@lezer/highlight";
 import type { SchemaMap } from "@/types";
 
 type SqlEditorProps = {
@@ -16,36 +18,38 @@ const theme = EditorView.theme(
   {
     "&": {
       height: "100%",
-      color: "#dbe4ee",
-      backgroundColor: "transparent",
+      color: "#e6edf3",
+      backgroundColor: "#161d26",
       fontSize: "12px",
     },
     ".cm-content": {
-      padding: "10px 0",
-      caretColor: "#2dd4bf",
+      padding: "12px 0",
+      caretColor: "#3fb950",
       fontFamily:
         "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace",
+      lineHeight: "1.6",
     },
     ".cm-gutters": {
-      backgroundColor: "transparent",
-      color: "#55636f",
+      backgroundColor: "#161d26",
+      color: "#5c6773",
       border: "none",
+      paddingRight: "8px",
     },
     "&.cm-focused": {
       outline: "none",
     },
     ".cm-activeLine": {
-      backgroundColor: "rgba(45, 212, 191, 0.05)",
+      backgroundColor: "rgba(63, 185, 80, 0.08)",
     },
     ".cm-activeLineGutter": {
       backgroundColor: "transparent",
-      color: "#2dd4bf",
+      color: "#3fb950",
     },
     ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection": {
-      backgroundColor: "rgba(45, 212, 191, 0.25)",
+      backgroundColor: "rgba(63, 185, 80, 0.35)",
     },
     ".cm-cursor, .cm-dropCursor": {
-      borderLeftColor: "#2dd4bf",
+      borderLeftColor: "#3fb950",
     },
     ".cm-scroller": {
       overflow: "auto",
@@ -53,17 +57,48 @@ const theme = EditorView.theme(
         "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace",
     },
     ".cm-tooltip": {
-      backgroundColor: "#141a20",
-      border: "1px solid #2a3744",
-      color: "#dbe4ee",
+      backgroundColor: "#11161d",
+      border: "1px solid #26303b",
+      color: "#e6edf3",
+      borderRadius: "6px",
     },
     ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
-      backgroundColor: "rgba(45, 212, 191, 0.15)",
-      color: "#b8fff4",
+      backgroundColor: "rgba(63, 185, 80, 0.2)",
+      color: "#e6edf3",
+    },
+    ".cm-tooltip-autocomplete > ul > li": {
+      padding: "4px 8px",
+    },
+    ".cm-panels": {
+      backgroundColor: "#11161d",
+      color: "#e6edf3",
+    },
+    ".cm-searchMatch": {
+      backgroundColor: "rgba(187, 128, 9, 0.35)",
+      outline: "1px solid rgba(187, 128, 9, 0.6)",
     },
   },
   { dark: true },
 );
+
+const highlightStyle = HighlightStyle.define([
+  { tag: tags.keyword, color: "#f85149" },
+  { tag: [tags.name, tags.deleted, tags.character, tags.propertyName, tags.macroName], color: "#79c0ff" },
+  { tag: [tags.function(tags.variableName), tags.labelName], color: "#3fb950" },
+  { tag: [tags.color, tags.constant(tags.name), tags.standard(tags.name)], color: "#79c0ff" },
+  { tag: [tags.definition(tags.name), tags.separator], color: "#e6edf3" },
+  { tag: [tags.typeName, tags.className, tags.number, tags.changed, tags.annotation, tags.modifier, tags.self, tags.namespace], color: "#ffa657" },
+  { tag: [tags.operator, tags.operatorKeyword, tags.url, tags.escape, tags.regexp, tags.link], color: "#f85149" },
+  { tag: [tags.meta, tags.comment], color: "#8b949e", fontStyle: "italic" },
+  { tag: tags.strong, fontWeight: "bold" },
+  { tag: tags.emphasis, fontStyle: "italic" },
+  { tag: tags.strikethrough, textDecoration: "line-through" },
+  { tag: tags.link, color: "#8b949e", textDecoration: "underline" },
+  { tag: tags.heading, fontWeight: "bold", color: "#79c0ff" },
+  { tag: [tags.atom, tags.bool, tags.special(tags.variableName)], color: "#79c0ff" },
+  { tag: [tags.string, tags.inserted], color: "#a5d6ff" },
+  { tag: tags.invalid, color: "#f85149" },
+]);
 
 export function SqlEditor({ value, schema, onChange, onRun }: SqlEditorProps) {
   const host = useRef<HTMLDivElement>(null);
@@ -83,6 +118,7 @@ export function SqlEditor({ value, schema, onChange, onRun }: SqlEditorProps) {
       extensions: [
         basicSetup,
         theme,
+        syntaxHighlighting(highlightStyle),
         EditorView.lineWrapping,
         placeholder("-- Write a read-only SQL query"),
         Prec.highest(

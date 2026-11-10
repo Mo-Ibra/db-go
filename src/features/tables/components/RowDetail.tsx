@@ -135,7 +135,7 @@ export function RowDetail({
                   </span>
                   {foreignKey && (
                     <span
-                      className="rounded-full border border-[#60a5fa]/30 bg-[#60a5fa]/10 px-1.5 py-0.5 text-[8.5px] text-[#93c5fd]"
+                      className="rounded-full border border-[#79c0ff]/30 bg-[#79c0ff]/10 px-1.5 py-0.5 text-[8.5px] text-[#79c0ff]"
                       title={`References ${foreignKey.referenced_table}.${foreignKey.referenced_column}`}
                     >
                       FK
@@ -206,7 +206,7 @@ export function RowDetail({
                 data-testid="delete-row"
                 className={cn(
                   buttonClass,
-                  "border-danger/35 text-[#fca5a5] hover:border-danger/60 hover:bg-danger/10",
+                  "border-danger/35 text-[#f85149] hover:border-danger/60 hover:bg-danger/10",
                 )}
                 onClick={onDelete}
               >

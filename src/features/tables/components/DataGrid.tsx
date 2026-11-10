@@ -400,7 +400,7 @@ export function DataGrid({
                   className={cn(
                     "flex border-b border-line/60",
                     dirty
-                      ? "bg-accent/[0.07] shadow-[inset_2px_0_0_#2dd4bf]"
+                      ? "bg-accent/[0.07] shadow-[inset_2px_0_0_#3fb950]"
                       : selected
                         ? "bg-accent/10"
                         : checked

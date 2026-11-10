@@ -223,15 +223,15 @@ export function AlterTableDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-auto bg-black/65 p-4 backdrop-blur-md"
       onClick={(event) => {
         if (event.target === event.currentTarget && !applying) onClose();
       }}
     >
       <div
-        className="w-full max-w-[860px] rounded-xl border border-line bg-panel shadow-2xl"
         role="dialog"
         aria-modal="true"
+        className="modal-panel w-full max-w-[860px] rounded-xl border border-line bg-panel shadow-2xl"
         aria-label="Alter table"
       >
         <div className="flex items-center justify-between border-b border-line px-5 py-3">
@@ -400,7 +400,7 @@ export function AlterTableDialog({
                     ))}
                 </select>
                 <button
-                  className="btn border-danger/35 bg-danger/10 text-[#fca5a5] hover:border-danger/60"
+                  className="btn border-danger/35 bg-danger/10 text-[#f85149] hover:border-danger/60"
                   type="button"
                   onClick={addDrop}
                 >
@@ -411,7 +411,7 @@ export function AlterTableDialog({
           </div>
 
           {formError && (
-            <div className="mt-3 rounded-md border border-danger/25 bg-danger/10 px-3 py-2 font-mono text-[11px] text-[#fecaca]">
+            <div className="mt-3 rounded-md border border-danger/25 bg-danger/10 px-3 py-2 font-mono text-[11px] text-[#f85149]">
               {formError}
             </div>
           )}
@@ -439,7 +439,7 @@ export function AlterTableDialog({
                     </span>
                     <button
                       type="button"
-                      className="text-[11px] text-muted hover:text-[#fca5a5]"
+                      className="text-[11px] text-muted hover:text-[#f85149]"
                       onClick={() =>
                         setOperations((current) => current.filter((_, i) => i !== index))
                       }
@@ -454,7 +454,7 @@ export function AlterTableDialog({
 
           <section className="mt-4">
             <h3 className={cn("field-label", "mb-2")}>SQL preview</h3>
-            <pre className="max-h-[180px] overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-ink p-3 font-mono text-[11px] leading-relaxed text-[#cbd5e1]">
+            <pre className="max-h-[180px] overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-ink p-3 font-mono text-[11px] leading-relaxed text-[#e6edf3]">
               {previewError
                 ? `-- ${previewError}`
                 : preview.length > 0

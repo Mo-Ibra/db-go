@@ -54,7 +54,7 @@ export function ResultView() {
                     data-testid="selection-bar"
                     className="flex h-9 flex-none items-center justify-between border-b border-line bg-accent/[0.04] px-3"
                   >
-                    <span className="text-[11px] font-semibold text-[#b8fff4]">
+                    <span className="text-[11px] font-semibold text-[#7ee787]">
                       {selectionKeys.size} selected
                     </span>
                     <div className="flex items-center gap-1.5">

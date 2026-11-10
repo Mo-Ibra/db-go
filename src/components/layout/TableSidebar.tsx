@@ -58,7 +58,7 @@ export function TableSidebar() {
             key={table.name}
             className={cn(
               "group flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-left text-[12.5px] text-fg hover:bg-panel-2",
-              selected === table.name && "border-accent/25 bg-accent/10 text-[#b8fff4]",
+              selected === table.name && "border-accent/25 bg-accent/10 text-[#7ee787]",
             )}
             onClick={() => selectTable(table.name)}
             title={table.name}
