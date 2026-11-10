@@ -21,7 +21,7 @@ What's here so far:
 - Structure inspector: DDL, columns, indexes, foreign keys, and index management
 - Alter tables from the GUI or CLI: add, rename, and drop columns with SQL preview
 - Indexes, views, and numbered migration files
-- Every schema change gets a backup, an audit row, and a migration record
+- Every schema change gets an audit row and a migration record
 - List tables in the sidebar
 - Browse rows with a virtualized grid
 - Keyset pagination (`rowid`) — fast on large tables
@@ -36,8 +36,8 @@ What's here so far:
 - Interactive ERD diagram: foreign-key edges, auto-layout, search, drag positions
 - GUI data editing with staged changes and one explicit **Save changes**
 - Inline cell editing, multi-row selection, and TSV copy/paste
-- Backup browser and safe restore with an automatic pre-restore snapshot
-- CLI writes: insert, upsert, update, delete, with automatic backups and audit
+- Backup browser with manual snapshots and restore
+- CLI writes: insert, upsert, update, delete, with audit sessions
 - Live refresh when the CLI changes the open database
 - `dbgo` CLI with human, JSON, and JSONL output, plus `dbgo init`
 - Tailwind CSS v4 UI
@@ -229,30 +229,35 @@ dbgo migrations .   # applied and pending files
 dbgo migrate .      # apply pending files in filename order
 ```
 
-Each applied migration gets its own timestamped backup and audit session.
-Migrations should contain plain SQL statements, not `BEGIN`/`COMMIT`.
+Each applied migration gets an audit session. Do not edit a migration that is
+already recorded as applied. Migrations should contain plain SQL statements,
+not `BEGIN`/`COMMIT`.
 
 ### Backups and restore
 
+Backups are **manual**. DBGo never creates one automatically for normal data or
+schema changes.
+
 ```bash
+dbgo backup .                               # take a snapshot now
 dbgo backups .                              # list snapshots, newest first
 dbgo restore . --latest --yes               # restore the newest snapshot
 dbgo restore . --backup <path> --yes        # restore one snapshot
 ```
 
-- The app's **Backups** dialog lists snapshots with size and timestamp.
-- A restore validates the snapshot with `PRAGMA quick_check`.
-- Before restoring, the current database is saved as a safety backup.
+- The app's **Backups** dialog has a **Take backup** button.
+- The dialog lists snapshots with size and timestamp.
+- A restore validates the snapshot before applying it.
+- Take a backup before restoring if you need to undo the restore.
 - The restore itself is recorded in `_dbgo_audit`.
-- Restoring is destructive: `--yes` is required, and changes made after the
-  chosen snapshot are lost.
 - Backups live in `backups/` for project folders, next to the file for
   single-file databases.
 
 ## Writing data
 
-Every write is transactional, creates a timestamped backup in `backups/`, and
-records an audit row.
+Every write is transactional and records an audit row. Backups are **not**
+created automatically; use `dbgo backup .` or the **Take backup** button when
+you want a snapshot.
 
 ```bash
 dbgo insert . companies --file rows.jsonl
@@ -295,7 +300,7 @@ deleted.
   the grid, and `Ctrl/Cmd+V` pastes TSV blocks starting at the active cell.
 - **Delete** stages selected rows for deletion; **Clear** only clears selection.
 - **Save changes** commits every staged change in one transaction, with one
-  timestamped backup and one audit session.
+  audit session. It does not create a backup automatically.
 - **Discard** throws away all staged changes without touching the database.
 - Navigation is blocked while changes are pending: switching tables, filtering,
   sorting, paging, refreshing, opening another database, and creating a table

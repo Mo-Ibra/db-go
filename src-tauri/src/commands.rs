@@ -387,6 +387,22 @@ pub async fn list_backups(state: State<'_, AppState>) -> Result<Vec<BackupInfo>,
 }
 
 #[tauri::command]
+pub async fn create_backup(state: State<'_, AppState>) -> Result<String, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let path = database.backup().map_err(to_error)?;
+        eprintln!("[dbgo] created backup: {}", path.display());
+        Ok(path.display().to_string())
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
 pub async fn restore_backup(
     backup: String,
     state: State<'_, AppState>,

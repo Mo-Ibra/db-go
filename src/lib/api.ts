@@ -48,6 +48,7 @@ export const api = {
   listMigrations: () => invoke<MigrationInfo[]>("list_migrations"),
   applyMigrations: () => invoke<MigrateResult>("apply_migrations"),
   listBackups: () => invoke<BackupInfo[]>("list_backups"),
+  createBackup: () => invoke<string>("create_backup"),
   restoreBackup: (backup: string) => invoke<RestoreResult>("restore_backup", { backup }),
   saveChanges: (
     table: string,

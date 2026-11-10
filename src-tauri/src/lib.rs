@@ -22,6 +22,7 @@ pub fn run() {
             commands::list_migrations,
             commands::apply_migrations,
             commands::list_backups,
+            commands::create_backup,
             commands::restore_backup,
             commands::foreign_keys,
             commands::explain_query,

@@ -831,10 +831,14 @@ fn output_schema_change(change: &SchemaChange, json: bool, jsonl: bool) -> Resul
     }
 
     print_line(&format!(
-        "migration {} · session {} · backup {}",
+        "migration {} · session {}{}",
         change.migration_name,
         change.session_id,
-        change.backup_path.as_deref().unwrap_or("-")
+        change
+            .backup_path
+            .as_deref()
+            .map(|path| format!(" · backup {path}"))
+            .unwrap_or_default()
     ))?;
     if let Some(path) = &change.migration_path {
         print_line(&format!("file {path}"))?;
@@ -923,10 +927,14 @@ fn output_migrate(result: &MigrateResult, json: bool, jsonl: bool) -> Result<(),
     }
     for migration in &result.applied {
         print_line(&format!(
-            "applied {} · session {} · backup {}",
+            "applied {} · session {}{}",
             migration.name,
             migration.session_id,
-            migration.backup_path.as_deref().unwrap_or("-")
+            migration
+                .backup_path
+                .as_deref()
+                .map(|path| format!(" · backup {path}"))
+                .unwrap_or_default()
         ))?;
     }
     print_line(&format!("{} migration(s) applied", result.applied.len()))
@@ -940,10 +948,14 @@ fn output_write(result: &WriteResult, json: bool, jsonl: bool) -> Result<(), Str
         return write_jsonl(std::slice::from_ref(result));
     }
     print_line(&format!(
-        "{} row(s) · session {} · backup {}",
+        "{} row(s) · session {}{}",
         result.affected,
         result.session_id,
-        result.backup_path.as_deref().unwrap_or("-")
+        result
+            .backup_path
+            .as_deref()
+            .map(|path| format!(" · backup {path}"))
+            .unwrap_or_default()
     ))
 }
 

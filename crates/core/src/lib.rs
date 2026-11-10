@@ -593,7 +593,6 @@ impl Database {
             }
         }
 
-        let safety = self.backup()?;
         self.conn.restore(
             rusqlite::MAIN_DB,
             &source,
@@ -607,7 +606,6 @@ impl Database {
         let before = serde_json::json!({ "database": self.path.display().to_string() });
         let after = serde_json::json!({
             "restored_from": source.display().to_string(),
-            "safety_backup": safety.display().to_string(),
         });
         record_audit(
             &self.conn,
@@ -626,7 +624,7 @@ impl Database {
 
         Ok(RestoreResult {
             restored_from: source.display().to_string(),
-            safety_backup: Some(safety.display().to_string()),
+            safety_backup: None,
             session_id,
             tables,
         })
@@ -1244,7 +1242,6 @@ impl Database {
             });
         }
 
-        let backup = self.backup()?;
         self.ensure_audit_table()?;
         let session_id = new_session_id();
         let quoted = quote_ident(table);
@@ -1291,7 +1288,7 @@ impl Database {
         Ok(WriteResult {
             session_id,
             affected,
-            backup_path: Some(backup.display().to_string()),
+            backup_path: None,
         })
     }
 
@@ -1309,7 +1306,6 @@ impl Database {
             });
         }
 
-        let backup = self.backup()?;
         self.ensure_audit_table()?;
         let session_id = new_session_id();
         let quoted = quote_ident(table);
@@ -1402,7 +1398,7 @@ impl Database {
         Ok(WriteResult {
             session_id,
             affected,
-            backup_path: Some(backup.display().to_string()),
+            backup_path: None,
         })
     }
 
@@ -1434,7 +1430,6 @@ impl Database {
             set_params.push(json_to_sql(value));
         }
 
-        let backup = self.backup()?;
         self.ensure_audit_table()?;
         let session_id = new_session_id();
         let (where_sql, where_params) = filter_clause(filter, &columns)?;
@@ -1467,14 +1462,13 @@ impl Database {
         Ok(WriteResult {
             session_id,
             affected,
-            backup_path: Some(backup.display().to_string()),
+            backup_path: None,
         })
     }
 
     pub fn delete_rows(&self, table: &str, filter: &FilterSpec) -> Result<WriteResult> {
         self.ensure_table(table)?;
         let columns = self.columns(table)?;
-        let backup = self.backup()?;
         self.ensure_audit_table()?;
         let session_id = new_session_id();
         let (where_sql, where_params) = filter_clause(filter, &columns)?;
@@ -1500,7 +1494,7 @@ impl Database {
         Ok(WriteResult {
             session_id,
             affected,
-            backup_path: Some(backup.display().to_string()),
+            backup_path: None,
         })
     }
 
@@ -1528,7 +1522,6 @@ impl Database {
             validate_json_columns(insert, &columns)?;
         }
 
-        let backup = self.backup()?;
         self.ensure_audit_table()?;
         let session_id = new_session_id();
         let quoted = quote_ident(table);
@@ -1628,7 +1621,7 @@ impl Database {
         Ok(WriteResult {
             session_id,
             affected,
-            backup_path: Some(backup.display().to_string()),
+            backup_path: None,
         })
     }
 
@@ -2682,7 +2675,6 @@ impl Database {
     }
 
     fn apply_migration_sql(&self, name: &str, sql: &str) -> Result<AppliedMigration> {
-        let backup = self.backup()?;
         self.ensure_migrations_table()?;
         self.ensure_audit_table()?;
         let session_id = new_session_id();
@@ -2710,7 +2702,7 @@ impl Database {
         Ok(AppliedMigration {
             name: name.to_string(),
             session_id,
-            backup_path: Some(backup.display().to_string()),
+            backup_path: None,
         })
     }
 
@@ -2730,7 +2722,6 @@ impl Database {
             ));
         }
 
-        let backup = self.backup()?;
         self.ensure_migrations_table()?;
         self.ensure_audit_table()?;
         let session_id = new_session_id();
@@ -2784,7 +2775,7 @@ impl Database {
 
         Ok(SchemaChange {
             session_id,
-            backup_path: Some(backup.display().to_string()),
+            backup_path: None,
             migration_id,
             migration_name,
             migration_path,
@@ -3223,7 +3214,7 @@ dbgo delete . companies \
 
 - `upsert` needs a UNIQUE or PRIMARY KEY constraint on the key column.
 - Updating primary key columns is not supported.
-- Every write creates a timestamped backup and an audit row.
+- Every write is audited. Backups are manual (`dbgo backup .`).
 
 ## Export
 
@@ -3240,9 +3231,9 @@ dbgo export . --query "select * from companies order by id" --format json --outp
 ## GUI edits
 
 The desktop app stages row edits and writes them only when the user clicks
-**Save changes**. Each save creates one backup and one audit session. The app
-does not reload the current page while edits are staged, so an agent can write
-safely and the user decides when to reload.
+**Save changes**. Each save creates one audit session. Backups are manual.
+The app does not reload the current page while edits are staged, so an agent
+can write safely and the user decides when to reload.
 
 Cells can be edited inline, selected in bulk, and copied/pasted as TSV. All of
 that stays pending until **Save changes**.
@@ -3346,17 +3337,16 @@ dbgo migrations .
 dbgo migrate .
 ```
 
-Migrations run in filename order. Each applied file gets its own backup and
-audit session. Do not edit a migration that is already recorded as applied.
+Migrations run in filename order. Each applied file gets an audit session. Do
+not edit a migration that is already recorded as applied.
 
 ## Backups and audit
 
-- Every write creates a timestamped snapshot in `backups/`.
-- `dbgo backup .` creates one explicitly.
+- Backups are manual. Use `dbgo backup .` when you want a snapshot.
 - `dbgo backups .` lists snapshots, newest first.
 - `dbgo restore . --latest --yes` restores the newest snapshot.
 - `dbgo restore . --backup <path> --yes` restores one specific snapshot.
-- A restore validates the snapshot and creates a safety backup first.
+- A restore validates the snapshot. Take a backup first if you need to undo it.
 - `dbgo sessions .` lists recent write sessions and their action counts.
 
 ## Rules
@@ -4177,7 +4167,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.affected, 1);
-        assert!(result.backup_path.is_some());
+        assert!(result.backup_path.is_none());
         assert_eq!(db.count_rows("companies", 100).unwrap().count, 1);
         assert_eq!(city_of(&db, "acme.test"), "Berlin");
 
@@ -4347,7 +4337,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.affected, 3);
-        assert!(result.backup_path.is_some());
+        assert!(result.backup_path.is_none());
         assert_eq!(db.count_rows("companies", 100).unwrap().count, 2);
         assert_eq!(city_of(&db, "acme.test"), "Munich");
         assert_eq!(city_of(&db, "initech.test"), "Tokyo");
@@ -4503,7 +4493,7 @@ mod tests {
 
         let change = db.alter_table("companies", &operations).unwrap();
         assert_eq!(change.statements.len(), 3);
-        assert!(change.backup_path.is_some());
+        assert!(change.backup_path.is_none());
 
         let columns = db.columns("companies").unwrap();
         let names = columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>();
@@ -4690,7 +4680,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_backups_and_restores_with_a_safety_backup() {
+    fn lists_backups_and_restores() {
         let (_dir, mut db) = temp_companies_db();
         db.insert_rows(
             "companies",
@@ -4723,14 +4713,16 @@ mod tests {
         assert!(listed_backup.size_bytes > 0);
 
         let result = db.restore_backup(&backup.display().to_string()).unwrap();
-        assert!(result.safety_backup.is_some());
+        assert!(result.safety_backup.is_none());
         assert_eq!(result.tables, 1);
         assert_eq!(city_of(&db, "acme.test"), "Berlin");
 
         let after = db.backups().unwrap();
-        assert!(after
-            .iter()
-            .any(|info| Some(info.path.clone()) == result.safety_backup));
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].path,
+            backup.canonicalize().unwrap().display().to_string()
+        );
         let sessions = db.sessions().unwrap();
         assert!(sessions
             .iter()

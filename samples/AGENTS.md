@@ -46,7 +46,7 @@ dbgo delete . companies \
 
 - `upsert` needs a UNIQUE or PRIMARY KEY constraint on the key column.
 - Updating primary key columns is not supported.
-- Every write creates a timestamped backup and an audit row.
+- Every write is audited. Backups are manual (`dbgo backup .`).
 
 ## Export
 
@@ -63,9 +63,9 @@ dbgo export . --query "select * from companies order by id" --format json --outp
 ## GUI edits
 
 The desktop app stages row edits and writes them only when the user clicks
-**Save changes**. Each save creates one backup and one audit session. The app
-does not reload the current page while edits are staged, so an agent can write
-safely and the user decides when to reload.
+**Save changes**. Each save creates one audit session. Backups are manual.
+The app does not reload the current page while edits are staged, so an agent
+can write safely and the user decides when to reload.
 
 Cells can be edited inline, selected in bulk, and copied/pasted as TSV. All of
 that stays pending until **Save changes**.
@@ -169,17 +169,16 @@ dbgo migrations .
 dbgo migrate .
 ```
 
-Migrations run in filename order. Each applied file gets its own backup and
-audit session. Do not edit a migration that is already recorded as applied.
+Migrations run in filename order. Each applied file gets an audit session. Do
+not edit a migration that is already recorded as applied.
 
 ## Backups and audit
 
-- Every write creates a timestamped snapshot in `backups/`.
-- `dbgo backup .` creates one explicitly.
+- Backups are manual. Use `dbgo backup .` when you want a snapshot.
 - `dbgo backups .` lists snapshots, newest first.
 - `dbgo restore . --latest --yes` restores the newest snapshot.
 - `dbgo restore . --backup <path> --yes` restores one specific snapshot.
-- A restore validates the snapshot and creates a safety backup first.
+- A restore validates the snapshot. Take a backup first if you need to undo it.
 - `dbgo sessions .` lists recent write sessions and their action counts.
 
 ## Rules

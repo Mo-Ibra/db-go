@@ -7,8 +7,10 @@ type BackupsDialogProps = {
   loading: boolean;
   error: string | null;
   restoring: string | null;
+  creating: boolean;
   onClose: () => void;
   onRefresh: () => void;
+  onCreateBackup: () => void;
   onRestore: (backup: BackupInfo) => void;
 };
 
@@ -42,17 +44,21 @@ export function BackupsDialog({
   loading,
   error,
   restoring,
+  creating,
   onClose,
   onRefresh,
+  onCreateBackup,
   onRestore,
 }: BackupsDialogProps) {
   if (!open) return null;
+
+  const busy = restoring !== null || creating;
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-6 backdrop-blur-sm"
       onClick={(event) => {
-        if (event.target === event.currentTarget && restoring === null) onClose();
+        if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
       <div
@@ -65,13 +71,14 @@ export function BackupsDialog({
           <div>
             <h2 className="text-base font-semibold tracking-tight">Backups</h2>
             <p className="mt-0.5 text-[11px] text-muted">
-              Restoring replaces the current database. A safety backup is created first.
+              Backups are manual. Take one when you want a snapshot; restoring
+              replaces the current database.
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            disabled={restoring !== null}
+            disabled={busy}
             aria-label="Close backups"
             className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-transparent text-lg leading-none text-muted hover:border-line-strong hover:bg-panel-2 hover:text-fg disabled:opacity-40"
           >
@@ -84,14 +91,24 @@ export function BackupsDialog({
             <span className="rounded-full border border-line bg-panel-3 px-2 py-0.5 text-[11px] text-muted">
               {backups.length} snapshot{backups.length === 1 ? "" : "s"}
             </span>
-            <button
-              className={BTN_NEUTRAL}
-              onClick={onRefresh}
-              disabled={loading || restoring !== null}
-              data-testid="backups-refresh"
-            >
-              {loading ? "Loading..." : "Refresh"}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                className={BTN_PRIMARY}
+                onClick={onCreateBackup}
+                disabled={loading || busy}
+                data-testid="create-backup"
+              >
+                {creating ? "Creating..." : "Take backup"}
+              </button>
+              <button
+                className={BTN_NEUTRAL}
+                onClick={onRefresh}
+                disabled={loading || busy}
+                data-testid="backups-refresh"
+              >
+                {loading ? "Loading..." : "Refresh"}
+              </button>
+            </div>
           </div>
 
           {error && (
@@ -103,12 +120,13 @@ export function BackupsDialog({
           <div className="overflow-hidden rounded-lg border border-line">
             {backups.length === 0 ? (
               <div className="px-3 py-6 text-center text-[11.5px] text-muted-2">
-                {loading ? "Loading backups..." : "No backups yet. Every write creates one."}
+                {loading ? "Loading backups..." : "No backups yet. Click Take backup to create one."}
               </div>
             ) : (
               backups.map((backup) => (
                 <div
                   key={backup.path}
+                  data-backup={backup.name}
                   className="flex items-center justify-between gap-3 border-b border-line/60 px-3 py-2 last:border-b-0"
                 >
                   <div className="min-w-0">
@@ -127,10 +145,10 @@ export function BackupsDialog({
                     className={cn(
                       BTN_PRIMARY,
                       "flex-none",
-                      restoring !== null && "opacity-60",
+                      busy && "opacity-60",
                     )}
                     onClick={() => onRestore(backup)}
-                    disabled={restoring !== null}
+                    disabled={busy}
                     data-testid="restore-backup"
                   >
                     {restoring === backup.path ? "Restoring..." : "Restore"}
@@ -141,10 +159,9 @@ export function BackupsDialog({
           </div>
 
           <p className="mt-3 text-[10.5px] leading-relaxed text-muted-2">
-            A restore writes the snapshot back into the open database and records a
-            <span className="font-mono"> restore </span>
-            audit entry. The current state is saved as a safety backup first, so a restore
-            can be undone.
+            Backups are only created when you click <span className="font-mono">Take backup</span>
+            {" "}or run <span className="font-mono">dbgo backup .</span>. Restoring replaces the
+            current database; take a backup first if you need to undo it.
           </p>
         </div>
 
@@ -153,7 +170,7 @@ export function BackupsDialog({
             className={BTN_NEUTRAL}
             type="button"
             onClick={onClose}
-            disabled={restoring !== null}
+            disabled={busy}
           >
             Close
           </button>

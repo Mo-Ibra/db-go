@@ -233,6 +233,7 @@ export default function App() {
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [backupsLoading, setBackupsLoading] = useState(false);
   const [backupsError, setBackupsError] = useState<string | null>(null);
+  const [creatingBackup, setCreatingBackup] = useState(false);
   const [restoringBackup, setRestoringBackup] = useState<string | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("csv");
   const [exporting, setExporting] = useState(false);
@@ -788,6 +789,7 @@ export default function App() {
     setBackups([]);
     setBackupsError(null);
     setBackupsLoading(false);
+    setCreatingBackup(false);
     setRestoringBackup(null);
     setNotice(null);
     setShowDesigner(false);
@@ -1436,11 +1438,26 @@ export default function App() {
     void loadBackups();
   }, [guardPending, loadBackups]);
 
+  const handleCreateBackup = useCallback(async () => {
+    if (creatingBackup || restoringBackup !== null) return;
+    setCreatingBackup(true);
+    setBackupsError(null);
+    try {
+      const path = await api.createBackup();
+      await loadBackups();
+      setNotice(`Backup created at ${path}`);
+    } catch (cause) {
+      setBackupsError(String(cause));
+    } finally {
+      setCreatingBackup(false);
+    }
+  }, [creatingBackup, restoringBackup, loadBackups]);
+
   const handleRestoreBackup = useCallback(
     async (backup: BackupInfo) => {
       if (guardPending()) return;
       const confirmed = await confirm(
-        `Restore ${backup.name}? The current database is saved as a safety backup first. Changes made after this snapshot will be lost.`,
+        `Restore ${backup.name}? This replaces the current database and cannot be undone unless you take a backup first. Changes made after this snapshot will be lost.`,
         { title: "Restore backup?", kind: "warning" },
       );
       if (!confirmed) return;
@@ -1450,12 +1467,9 @@ export default function App() {
       try {
         const result = await api.restoreBackup(backup.path);
         await loadBackups();
-        const safety = result.safety_backup
-          ? ` · safety backup ${result.safety_backup}`
-          : "";
         await refreshAfterSchemaChange(
           selected,
-          `Restored ${backup.name} · ${result.tables} table(s)${safety}`,
+          `Restored ${backup.name} · ${result.tables} table(s)`,
         );
       } catch (cause) {
         setBackupsError(String(cause));
@@ -2610,8 +2624,10 @@ export default function App() {
         loading={backupsLoading}
         error={backupsError}
         restoring={restoringBackup}
+        creating={creatingBackup}
         onClose={() => setShowBackups(false)}
         onRefresh={() => void loadBackups()}
+        onCreateBackup={() => void handleCreateBackup()}
         onRestore={(backup) => void handleRestoreBackup(backup)}
       />
 
