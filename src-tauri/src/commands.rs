@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
+use std::io::Write;
 
 use db_go_core::{
-    AlterTableOp, BackupInfo, ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec,
-    JsonObject, MigrateResult, MigrationInfo, Page, QueryResult, RestoreResult, RowUpdate,
-    SchemaChange, SchemaGraph, SortSpec, TableDesign, TableDetails, TableInfo, WriteResult,
+    AlterTableOp, BackupInfo, ColumnInfo, CountResult, Database, DatabaseStats, DbInfo, Direction,
+    ExportFormat, FilterSpec, ForeignKeyInfo, JsonObject, MigrateResult, MigrationInfo, Page,
+    QueryPlan, QueryResult, RestoreResult, RowUpdate, SchemaChange, SchemaGraph, SortSpec,
+    TableDesign, TableDetails, TableInfo, TableStats, WriteResult,
 };
 use tauri::State;
 
@@ -401,6 +403,116 @@ pub async fn restore_backup(
             result.restored_from, result.tables, result.session_id
         );
         Ok(result)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn foreign_keys(
+    table: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ForeignKeyInfo>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ForeignKeyInfo>, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        database.foreign_keys(&table).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn explain_query(sql: String, state: State<'_, AppState>) -> Result<QueryPlan, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<QueryPlan, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let plan = database.explain_query(&sql).map_err(to_error)?;
+        eprintln!(
+            "[dbgo] explained query: {} step(s), {} full scan(s)",
+            plan.steps.len(),
+            plan.full_scans
+        );
+        Ok(plan)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[derive(serde::Serialize)]
+pub struct ExportResponse {
+    pub path: String,
+    pub rows: usize,
+}
+
+#[tauri::command]
+pub async fn database_stats(state: State<'_, AppState>) -> Result<DatabaseStats, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<DatabaseStats, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        database.database_stats().map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn table_stats(table: String, state: State<'_, AppState>) -> Result<TableStats, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<TableStats, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        database.table_stats(&table).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn export_data(
+    table: Option<String>,
+    query: Option<String>,
+    filter: Option<FilterSpec>,
+    sort: Option<SortSpec>,
+    format: ExportFormat,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ExportResponse, String> {
+    if table.is_some() == query.is_some() {
+        return Err("export needs exactly one of table or query".to_string());
+    }
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<ExportResponse, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+
+        let file = std::fs::File::create(&path).map_err(to_error)?;
+        let mut writer = std::io::BufWriter::new(file);
+        let rows = if let Some(table) = &table {
+            database
+                .export_table(table, filter.as_ref(), sort.as_ref(), format, &mut writer)
+                .map_err(to_error)?
+        } else {
+            database
+                .export_query(query.as_deref().unwrap_or_default(), format, &mut writer)
+                .map_err(to_error)?
+        };
+        writer.flush().map_err(to_error)?;
+        eprintln!("[dbgo] exported {rows} row(s) to {path}");
+        Ok(ExportResponse { path, rows })
     })
     .await
     .map_err(to_error)?

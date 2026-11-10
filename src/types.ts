@@ -43,6 +43,55 @@ export type QueryResult = {
   truncated: boolean;
 };
 
+export type QueryPlanStep = {
+  id: number;
+  parent: number;
+  detail: string;
+  full_scan: boolean;
+  uses_index: boolean;
+};
+
+export type QueryPlan = {
+  sql: string;
+  steps: QueryPlanStep[];
+  full_scans: number;
+  indexes_used: number;
+};
+
+export type IndexStats = {
+  name: string;
+  unique: boolean;
+  columns: string[];
+  size_bytes: number | null;
+};
+
+export type TableStats = {
+  name: string;
+  row_count: number;
+  row_count_capped: boolean;
+  row_count_estimated: boolean;
+  size_bytes: number | null;
+  index_bytes: number | null;
+  indexes: IndexStats[];
+};
+
+export type DatabaseStats = {
+  path: string;
+  page_size: number;
+  page_count: number;
+  free_bytes: number;
+  total_bytes: number;
+  dbstat: boolean;
+  tables: TableStats[];
+};
+
+export type ExportFormat = "csv" | "json";
+
+export type ExportResponse = {
+  path: string;
+  rows: number;
+};
+
 export type SchemaMap = Record<string, string[]>;
 
 export type SchemaColumn = {

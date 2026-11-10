@@ -1,13 +1,14 @@
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use db_go_core::{
     AlterTableOp, BackupInfo, CellValue, ColumnDesign, ColumnInfo, CountResult, Database,
-    Direction, FilterSpec, IndexInfo, JsonObject, MigrateResult, MigrationInfo, Page, QueryResult,
-    RestoreResult, SchemaChange, SchemaGraph, SessionSummary, TableDesign, TableInfo, ViewInfo,
-    WriteResult,
+    DatabaseStats, Direction, ExportFormat, FilterSpec, IndexInfo, JsonObject, MigrateResult,
+    MigrationInfo, Page, QueryPlan, QueryResult, RestoreResult, SchemaChange, SchemaGraph,
+    SessionSummary, SortDirection, SortSpec, TableDesign, TableInfo, ViewInfo, WriteResult,
 };
 use serde::Serialize;
 
@@ -153,6 +154,9 @@ enum Command {
     /// List recent write sessions from the audit log.
     Sessions { db: PathBuf },
 
+    /// Show page, table, and index size statistics.
+    Stats { db: PathBuf },
+
     /// Create or refresh agent files beside the database.
     AgentGuide { db: PathBuf },
 
@@ -189,6 +193,30 @@ enum Command {
         sql: String,
         #[arg(long, default_value_t = 100)]
         limit: u32,
+    },
+
+    /// Show SQLite's query plan without running the statement.
+    Explain {
+        db: PathBuf,
+        #[arg(help = "A SQL statement to explain")]
+        sql: String,
+    },
+
+    /// Export a table or query result as CSV or JSON.
+    Export {
+        db: PathBuf,
+        #[arg(help = "Table to export")]
+        table: Option<String>,
+        #[arg(long, conflicts_with = "table", help = "Read-only query to export")]
+        query: Option<String>,
+        #[arg(long, value_enum, default_value_t = ExportFormatArg::Csv)]
+        format: ExportFormatArg,
+        #[arg(long, help = "Output file; stdout when omitted")]
+        output: Option<PathBuf>,
+        #[arg(long = "where", help = "JSON filter for a table export")]
+        filter: Option<String>,
+        #[arg(long, value_name = "COLUMN:ASC|DESC", help = "Sort for a table export")]
+        sort: Option<String>,
     },
 }
 
@@ -243,6 +271,21 @@ enum ViewCommand {
 enum DirectionArg {
     Next,
     Prev,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ExportFormatArg {
+    Csv,
+    Json,
+}
+
+impl From<ExportFormatArg> for ExportFormat {
+    fn from(value: ExportFormatArg) -> Self {
+        match value {
+            ExportFormatArg::Csv => ExportFormat::Csv,
+            ExportFormatArg::Json => ExportFormat::Json,
+        }
+    }
 }
 
 impl From<DirectionArg> for Direction {
@@ -504,6 +547,11 @@ fn run(cli: Cli) -> Result<(), String> {
             let sessions = database.sessions().map_err(err)?;
             output_sessions(&sessions, cli.json, cli.jsonl)
         }
+        Command::Stats { db } => {
+            let database = open(&db)?;
+            let stats = database.database_stats().map_err(err)?;
+            output_stats(&stats, cli.json, cli.jsonl)
+        }
         Command::AgentGuide { db } => {
             let mut database = open(&db)?;
             let info = database.refresh_agent_guide().map_err(err)?;
@@ -548,6 +596,63 @@ fn run(cli: Cli) -> Result<(), String> {
             let database = open(&db)?;
             let result = database.query(&sql, limit).map_err(err)?;
             output_query(&result, cli.json, cli.jsonl)
+        }
+        Command::Explain { db, sql } => {
+            let database = open(&db)?;
+            let plan = database.explain_query(&sql).map_err(err)?;
+            output_plan(&plan, cli.json, cli.jsonl)
+        }
+        Command::Export {
+            db,
+            table,
+            query,
+            format,
+            output,
+            filter,
+            sort,
+        } => {
+            if table.is_none() && query.is_none() {
+                return Err("export needs a table or --query".to_string());
+            }
+            if query.is_some() && (filter.is_some() || sort.is_some()) {
+                return Err("--where and --sort apply to table exports only".to_string());
+            }
+            let filter = match filter {
+                Some(filter) => Some(serde_json::from_str::<FilterSpec>(&filter).map_err(err)?),
+                None => None,
+            };
+            let sort = match sort {
+                Some(sort) => {
+                    let (column, direction) = sort
+                        .split_once(':')
+                        .or_else(|| sort.split_once('='))
+                        .ok_or_else(|| format!("sort expects COLUMN:ASC|DESC: {sort}"))?;
+                    let direction = match direction.trim().to_ascii_lowercase().as_str() {
+                        "asc" => SortDirection::Asc,
+                        "desc" => SortDirection::Desc,
+                        _ => return Err(format!("invalid sort direction: {direction}")),
+                    };
+                    Some(SortSpec {
+                        column: column.trim().to_string(),
+                        direction,
+                    })
+                }
+                None => None,
+            };
+            let database = open(&db)?;
+            let format = format.into();
+            if let Some(table) = table {
+                run_export(output.as_deref(), |writer| {
+                    database
+                        .export_table(&table, filter.as_ref(), sort.as_ref(), format, writer)
+                        .map_err(err)
+                })?;
+            } else if let Some(query) = query {
+                run_export(output.as_deref(), |writer| {
+                    database.export_query(&query, format, writer).map_err(err)
+                })?;
+            }
+            Ok(())
         }
     }
 }
@@ -1003,6 +1108,119 @@ fn output_query(result: &QueryResult, json: bool, jsonl: bool) -> Result<(), Str
     print_table(table)?;
     if result.truncated {
         print_line("(truncated — raise --limit to see more)")?;
+    }
+    Ok(())
+}
+
+fn output_plan(plan: &QueryPlan, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(plan);
+    }
+    if jsonl {
+        return write_jsonl(std::slice::from_ref(plan));
+    }
+
+    let mut table = human_table();
+    table.set_header(vec!["id", "parent", "detail"]);
+    for step in &plan.steps {
+        table.add_row(vec![
+            step.id.to_string(),
+            step.parent.to_string(),
+            if step.full_scan {
+                format!("⚠ {}", step.detail)
+            } else {
+                step.detail.clone()
+            },
+        ]);
+    }
+    print_table(table)?;
+    print_line(&format!(
+        "{} step(s) · {} full scan(s) · {} index lookup(s)",
+        plan.steps.len(),
+        plan.full_scans,
+        plan.indexes_used
+    ))
+}
+
+fn output_stats(stats: &DatabaseStats, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(stats);
+    }
+    if jsonl {
+        return write_jsonl(&stats.tables);
+    }
+
+    print_line(&format!(
+        "{} · {} · page {} · {} pages · free {} · dbstat {}",
+        stats.path,
+        format_bytes(stats.total_bytes.max(0) as u64),
+        stats.page_size,
+        stats.page_count,
+        format_bytes(stats.free_bytes.max(0) as u64),
+        if stats.dbstat { "yes" } else { "unavailable" }
+    ))?;
+
+    let mut table = human_table();
+    table.set_header(vec!["table", "rows", "table size", "index size"]);
+    for stats in &stats.tables {
+        let rows = if stats.row_count_capped {
+            format!("{}+", stats.row_count)
+        } else if stats.row_count_estimated {
+            format!("~{}", stats.row_count)
+        } else {
+            stats.row_count.to_string()
+        };
+        table.add_row(vec![
+            stats.name.clone(),
+            rows,
+            optional_bytes(stats.size_bytes),
+            optional_bytes(stats.index_bytes),
+        ]);
+    }
+    print_table(table)?;
+
+    let mut index_table = human_table();
+    index_table.set_header(vec!["table", "index", "size", "columns"]);
+    let mut has_indexes = false;
+    for table in &stats.tables {
+        for index in &table.indexes {
+            has_indexes = true;
+            index_table.add_row(vec![
+                table.name.clone(),
+                index.name.clone(),
+                optional_bytes(index.size_bytes),
+                index.columns.join(", "),
+            ]);
+        }
+    }
+    if has_indexes {
+        print_table(index_table)?;
+    }
+    Ok(())
+}
+
+fn optional_bytes(bytes: Option<i64>) -> String {
+    bytes
+        .map(|value| format_bytes(value.max(0) as u64))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn run_export<F>(output: Option<&Path>, export: F) -> Result<(), String>
+where
+    F: FnOnce(&mut dyn Write) -> Result<usize, String>,
+{
+    if let Some(path) = output {
+        let file = File::create(path).map_err(err)?;
+        let mut writer = BufWriter::new(file);
+        let rows = export(&mut writer)?;
+        writer.flush().map_err(err)?;
+        println!("exported {rows} row(s) to {}", path.display());
+    } else {
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        let rows = export(&mut writer)?;
+        writer.flush().map_err(err)?;
+        eprintln!("exported {rows} row(s)");
     }
     Ok(())
 }

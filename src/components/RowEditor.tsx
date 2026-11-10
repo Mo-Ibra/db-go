@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { CellValue, ColumnInfo, JsonObject, Row } from "../types";
+import type { ColumnInfo, JsonObject, Row } from "../types";
+import { cellText, isBlobType, isIntegerType, parseCellInput } from "../lib/cellValues";
 import { cn } from "../lib/cn";
 
 type RowEditorProps = {
@@ -10,42 +11,6 @@ type RowEditorProps = {
   onClose: () => void;
   onSubmit: (values: JsonObject) => void;
 };
-
-function typeMatches(typeName: string, needles: string[]): boolean {
-  const upper = typeName.toUpperCase();
-  return needles.some((needle) => upper.includes(needle));
-}
-
-function isIntegerType(typeName: string): boolean {
-  return typeMatches(typeName, ["INT"]);
-}
-
-function isRealType(typeName: string): boolean {
-  return typeMatches(typeName, ["REAL", "NUM", "FLOAT", "DOUBLE", "DEC"]);
-}
-
-function isBooleanType(typeName: string): boolean {
-  return typeMatches(typeName, ["BOOL"]);
-}
-
-function isBlobType(typeName: string): boolean {
-  return typeMatches(typeName, ["BLOB"]);
-}
-
-function cellText(cell: CellValue | undefined): string {
-  if (!cell) return "";
-  switch (cell.kind) {
-    case "null":
-      return "";
-    case "integer":
-    case "real":
-      return String(cell.value);
-    case "text":
-      return cell.value;
-    case "blob":
-      return "";
-  }
-}
 
 function parseValue(
   column: ColumnInfo,
@@ -58,32 +23,7 @@ function parseValue(
     }
     return null;
   }
-  if (isBlobType(column.type_name)) {
-    throw new Error(`${column.name} is a BLOB column and is not editable here.`);
-  }
-  const trimmed = raw.trim();
-  if (isBooleanType(column.type_name)) {
-    if (trimmed === "1" || trimmed.toLowerCase() === "true") return 1;
-    if (trimmed === "0" || trimmed.toLowerCase() === "false") return 0;
-    throw new Error(`${column.name} expects 0 or 1.`);
-  }
-  if (isIntegerType(column.type_name)) {
-    if (!/^[+-]?\d+$/.test(trimmed)) {
-      throw new Error(`${column.name} expects an integer.`);
-    }
-    const value = Number(trimmed);
-    if (!Number.isSafeInteger(value)) {
-      throw new Error(`${column.name} is outside the safe integer range.`);
-    }
-    return value;
-  }
-  if (isRealType(column.type_name)) {
-    if (trimmed === "" || Number.isNaN(Number(trimmed))) {
-      throw new Error(`${column.name} expects a number.`);
-    }
-    return Number(trimmed);
-  }
-  return raw;
+  return parseCellInput(column, raw);
 }
 
 export function RowEditor({

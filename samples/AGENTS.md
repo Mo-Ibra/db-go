@@ -14,6 +14,8 @@ The database is `companies.db` in this folder. Never edit the database file dire
 - `dbgo query . "select * from companies limit 20" --json`
 - `dbgo page . companies --limit 50`
 - `dbgo count . companies`
+- `dbgo explain . "select ..." --json` — query plan without executing it
+- `dbgo stats . --json` — page, table, and index sizes
 
 ## Write data
 
@@ -46,12 +48,27 @@ dbgo delete . companies \
 - Updating primary key columns is not supported.
 - Every write creates a timestamped backup and an audit row.
 
+## Export
+
+```bash
+dbgo export . companies --format csv --output companies.csv
+dbgo export . companies --format json --where '{"column":"id","op":"gte","value":1}'
+dbgo export . --query "select * from companies order by id" --format json --output result.json
+```
+
+- Exports are read-only and do not create backups.
+- Omit `--output` to write data to stdout.
+- BLOB values are base64-encoded.
+
 ## GUI edits
 
 The desktop app stages row edits and writes them only when the user clicks
 **Save changes**. Each save creates one backup and one audit session. The app
 does not reload the current page while edits are staged, so an agent can write
 safely and the user decides when to reload.
+
+Cells can be edited inline, selected in bulk, and copied/pasted as TSV. All of
+that stays pending until **Save changes**.
 
 ## Create tables
 

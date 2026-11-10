@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { confirm, open } from "@tauri-apps/plugin-dialog";
+import type { MouseEvent as ReactMouseEvent } from "react";
+import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "./lib/api";
 import type {
   BackupInfo,
@@ -7,11 +8,14 @@ import type {
   ColumnInfo,
   CountResult,
   DbInfo,
+  ExportFormat,
   FilterOp,
   FilterSpec,
+  ForeignKeyInfo,
   JsonObject,
   MigrationInfo,
   Page,
+  QueryPlan,
   QueryResult,
   Row,
   RowUpdate,
@@ -21,6 +25,7 @@ import type {
   SortSpec,
   TableDetails,
   TableInfo,
+  TableStats,
 } from "./types";
 import { DataGrid } from "./components/DataGrid";
 import { RowDetail } from "./components/RowDetail";
@@ -29,8 +34,18 @@ import { StructureView } from "./components/StructureView";
 import { AlterTableDialog } from "./components/AlterTableDialog";
 import { MigrationsDialog } from "./components/MigrationsDialog";
 import { BackupsDialog } from "./components/BackupsDialog";
+import { QueryPlanPanel } from "./components/QueryPlanPanel";
 import { TableDesigner } from "./components/TableDesigner";
 import { cn } from "./lib/cn";
+import {
+  cellToValue,
+  clipboardCellText,
+  parseCellInput,
+  parseClipboardRows,
+  rowSelectionKey,
+  valueToCell,
+} from "./lib/cellValues";
+import { copyText } from "./lib/clipboard";
 
 const SqlEditor = lazy(() =>
   import("./components/SqlEditor").then((module) => ({ default: module.SqlEditor })),
@@ -65,6 +80,7 @@ const BTN_PRIMARY_COLOR =
   "border-[#14b8a6] bg-linear-to-b from-accent to-[#14b8a6] font-bold text-[#03110f] hover:brightness-110";
 const BTN_PRIMARY = `${BTN} ${BTN_PRIMARY_COLOR}`;
 const BTN_SM_PRIMARY = `${BTN_SM} ${BTN_PRIMARY_COLOR}`;
+const BTN_NEUTRAL = `${BTN} border-line-strong bg-panel-2 text-fg hover:border-[#3a4a5a] hover:bg-panel-3`;
 const BTN_LARGE_PRIMARY = `${BTN_LARGE} ${BTN_PRIMARY_COLOR}`;
 const BTN_LARGE_NEUTRAL = `${BTN_LARGE} border-line-strong bg-panel-2 text-fg hover:border-[#3a4a5a] hover:bg-panel-3`;
 const BTN_GHOST = `${BTN} border-transparent bg-transparent text-fg hover:border-line-strong hover:bg-panel-2`;
@@ -100,33 +116,6 @@ function makePendingKey(): string {
 
 function isBlobColumn(column: ColumnInfo): boolean {
   return column.type_name.toUpperCase().includes("BLOB");
-}
-
-function cellToValue(cell: CellValue | undefined): unknown {
-  if (!cell) return null;
-  switch (cell.kind) {
-    case "null":
-      return null;
-    case "integer":
-    case "real":
-    case "text":
-      return cell.value;
-    case "blob":
-      return null;
-  }
-}
-
-function valueToCell(value: unknown): CellValue {
-  if (value === null || value === undefined) return { kind: "null" };
-  if (typeof value === "number") {
-    return Number.isInteger(value)
-      ? { kind: "integer", value }
-      : { kind: "real", value };
-  }
-  if (typeof value === "boolean") {
-    return { kind: "integer", value: value ? 1 : 0 };
-  }
-  return { kind: "text", value: String(value) };
 }
 
 function rowToValues(columns: ColumnInfo[], row: Row): JsonObject {
@@ -184,6 +173,7 @@ export default function App() {
   const [filterText, setFilterText] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [columns, setColumns] = useState<ColumnInfo[]>([]);
+  const [foreignKeys, setForeignKeys] = useState<ForeignKeyInfo[]>([]);
   const [page, setPage] = useState<Page | null>(null);
   const [pageSize, setPageSize] = useState(200);
   const [history, setHistory] = useState<(number | null)[]>([null]);
@@ -200,6 +190,8 @@ export default function App() {
   const [schemaGraph, setSchemaGraph] = useState<SchemaGraph | null>(null);
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [queryRunning, setQueryRunning] = useState(false);
+  const [queryPlan, setQueryPlan] = useState<QueryPlan | null>(null);
+  const [explainRunning, setExplainRunning] = useState(false);
   const [queryLimit, setQueryLimit] = useState(1000);
   const [queryHistory, setQueryHistory] = useState<string[]>(() => {
     try {
@@ -221,12 +213,15 @@ export default function App() {
     value: string;
   }>({ column: "", op: "contains", value: "" });
   const [selectedRow, setSelectedRow] = useState<{ row: Row; index: number } | null>(null);
+  const [selectionKeys, setSelectionKeys] = useState<Set<string>>(new Set());
+  const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
   const [pendingInserts, setPendingInserts] = useState<PendingInsert[]>([]);
   const [pendingUpdates, setPendingUpdates] = useState<PendingUpdate[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<number[]>([]);
   const [rowEditor, setRowEditor] = useState<RowEditorState | null>(null);
   const [saving, setSaving] = useState(false);
   const [tableDetails, setTableDetails] = useState<TableDetails | null>(null);
+  const [tableStats, setTableStats] = useState<TableStats | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [showAlterTable, setShowAlterTable] = useState(false);
   const [showMigrations, setShowMigrations] = useState(false);
@@ -239,6 +234,8 @@ export default function App() {
   const [backupsLoading, setBackupsLoading] = useState(false);
   const [backupsError, setBackupsError] = useState<string | null>(null);
   const [restoringBackup, setRestoringBackup] = useState<string | null>(null);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("csv");
+  const [exporting, setExporting] = useState(false);
   const requestId = useRef(0);
   const detailsRequestId = useRef(0);
   const bootstrapped = useRef(false);
@@ -267,6 +264,15 @@ export default function App() {
     return [...rows, ...pendingInserts.map((insert) => pendingInsertToRow(columns, insert))];
   }, [page, columns, pendingUpdates, pendingDeletes, pendingInserts]);
 
+  const visibleSelectionKeys = useMemo(
+    () => displayRows.map((row, index) => rowSelectionKey(row, index)),
+    [displayRows],
+  );
+  const allSelected =
+    visibleSelectionKeys.length > 0 &&
+    visibleSelectionKeys.every((key) => selectionKeys.has(key));
+  const someSelected = visibleSelectionKeys.some((key) => selectionKeys.has(key));
+
   const guardPending = useCallback((): boolean => {
     if (saving || restoringBackup !== null) {
       setNotice(
@@ -287,8 +293,300 @@ export default function App() {
     setPendingDeletes([]);
     setRowEditor(null);
     setSelectedRow(null);
+    setSelectionKeys(new Set());
+    setLastSelectedIndex(null);
     setNotice("Discarded unsaved changes.");
   }, []);
+
+  const clearSelection = useCallback(() => {
+    setSelectionKeys(new Set());
+    setLastSelectedIndex(null);
+  }, []);
+
+  const toggleRowSelection = useCallback(
+    (row: Row, index: number, event: ReactMouseEvent) => {
+      const key = rowSelectionKey(row, index);
+
+      if (event.shiftKey && lastSelectedIndex !== null) {
+        const start = Math.min(lastSelectedIndex, index);
+        const end = Math.max(lastSelectedIndex, index);
+        const range = displayRows
+          .slice(start, end + 1)
+          .map((candidate, offset) => rowSelectionKey(candidate, start + offset));
+        setSelectionKeys((current) => {
+          const next = new Set(current);
+          range.forEach((rangeKey) => next.add(rangeKey));
+          return next;
+        });
+        setLastSelectedIndex(index);
+        return;
+      }
+
+      setSelectionKeys((current) => {
+        const next = new Set(current);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      });
+      setLastSelectedIndex(index);
+    },
+    [displayRows, lastSelectedIndex],
+  );
+
+  const toggleAllSelection = useCallback(() => {
+    setSelectionKeys((current) => {
+      const next = new Set(current);
+      if (allSelected) {
+        visibleSelectionKeys.forEach((key) => next.delete(key));
+      } else {
+        visibleSelectionKeys.forEach((key) => next.add(key));
+      }
+      return next;
+    });
+    setLastSelectedIndex(null);
+  }, [allSelected, visibleSelectionKeys]);
+
+  const copySelectedRows = useCallback(async () => {
+    const rows = displayRows.filter((row, index) =>
+      selectionKeys.has(rowSelectionKey(row, index)),
+    );
+    if (rows.length === 0) {
+      setNotice("Select rows to copy first.");
+      return;
+    }
+    const sanitize = (value: string) =>
+      value.replace(/\t/g, " ").replace(/\r?\n/g, " ");
+    const header = columns.map((column) => sanitize(column.name)).join("\t");
+    const lines = rows.map((row) =>
+      row.cells.map((cell) => sanitize(clipboardCellText(cell))).join("\t"),
+    );
+    await copyText([header, ...lines].join("\n"));
+    setNotice(`Copied ${rows.length} row(s)`);
+  }, [displayRows, selectionKeys, columns]);
+
+  const deleteSelectedRows = useCallback(() => {
+    const rows = displayRows.filter((row, index) =>
+      selectionKeys.has(rowSelectionKey(row, index)),
+    );
+    if (rows.length === 0) return;
+
+    const insertKeys = new Set<string>();
+    const rowids = new Set<number>();
+    for (const row of rows) {
+      if (row.pendingKey) insertKeys.add(row.pendingKey);
+      else if (row.rowid !== null) rowids.add(row.rowid);
+    }
+
+    if (insertKeys.size > 0) {
+      setPendingInserts((current) =>
+        current.filter((insert) => !insertKeys.has(insert.key)),
+      );
+    }
+    if (rowids.size > 0) {
+      setPendingUpdates((current) =>
+        current.filter((update) => !rowids.has(update.rowid)),
+      );
+      setPendingDeletes((current) => {
+        const next = new Set(current);
+        rowids.forEach((rowid) => next.add(rowid));
+        return [...next];
+      });
+    }
+
+    const parts = [];
+    if (rowids.size > 0) parts.push(`staged ${rowids.size} row(s) for deletion`);
+    if (insertKeys.size > 0) parts.push(`removed ${insertKeys.size} pending insert(s)`);
+    setNotice(parts.join(" · "));
+    clearSelection();
+  }, [displayRows, selectionKeys, clearSelection]);
+
+  const handleCellCommit = useCallback(
+    (
+      row: Row,
+      _rowIndex: number,
+      column: ColumnInfo,
+      _columnIndex: number,
+      text: string,
+    ): string | null => {      let value: unknown;
+      try {
+        value = parseCellInput(column, text);
+      } catch (cause) {
+        return cause instanceof Error ? cause.message : String(cause);
+      }
+
+      if (row.pendingKey) {
+        setPendingInserts((current) =>
+          current.map((insert) =>
+            insert.key === row.pendingKey
+              ? { ...insert, values: { ...insert.values, [column.name]: value } }
+              : insert,
+          ),
+        );
+        return null;
+      }
+      if (row.rowid === null) return "This row cannot be edited.";
+
+      const rowid = row.rowid;
+      setPendingUpdates((current) => {
+        const existing = current.find((update) => update.rowid === rowid);
+        const before = existing?.before ?? rowToValues(columns, row);
+        const merged: JsonObject = {
+          ...(existing?.values ?? {}),
+          [column.name]: value,
+        };
+        const changed: JsonObject = {};
+        for (const [name, candidate] of Object.entries(merged)) {
+          if (!valuesEqual(candidate, before[name])) changed[name] = candidate;
+        }
+        if (Object.keys(changed).length === 0) {
+          return current.filter((update) => update.rowid !== rowid);
+        }
+        if (existing) {
+          return current.map((update) =>
+            update.rowid === rowid ? { ...update, values: changed } : update,
+          );
+        }
+        return [...current, { rowid, values: changed, before }];
+      });
+      return null;
+    },
+    [columns],
+  );
+
+  const canEditCell = useCallback(
+    (row: Row, column: ColumnInfo) => {
+      if (view !== "data") return false;
+      if (column.primary_key || isBlobColumn(column)) return false;
+      return row.pendingKey !== undefined || row.rowid !== null;
+    },
+    [view],
+  );
+
+  const pasteIntoCell = useCallback(
+    (text: string, cell: { rowIndex: number; columnIndex: number }) => {
+      const matrix = parseClipboardRows(text);
+      if (matrix.length === 0) return;
+
+      const targetColumns = columns.slice(cell.columnIndex);
+      if (targetColumns.length === 0) return;
+
+      const firstRow = matrix[0];
+      const headerMatches =
+        matrix.length > 1 &&
+        firstRow.length > 0 &&
+        targetColumns
+          .slice(0, firstRow.length)
+          .every(
+            (column, index) =>
+              firstRow[index]?.trim().toLowerCase() === column.name.toLowerCase(),
+          );
+      const dataRows = headerMatches ? matrix.slice(1) : matrix;
+      if (dataRows.length === 0) return;
+
+      const targetRows = displayRows.slice(
+        cell.rowIndex,
+        cell.rowIndex + dataRows.length,
+      );
+      if (targetRows.length === 0) return;
+
+      const changes: {
+        row: Row;
+        rowid: number | null;
+        pendingKey?: string;
+        values: JsonObject;
+      }[] = [];
+
+      for (let rowIndex = 0; rowIndex < targetRows.length; rowIndex += 1) {
+        const row = targetRows[rowIndex];
+        const pastedRow = dataRows[rowIndex];
+        if (!pastedRow) break;
+        const values: JsonObject = {};
+        for (
+          let columnIndex = 0;
+          columnIndex < Math.min(pastedRow.length, targetColumns.length);
+          columnIndex += 1
+        ) {
+          const column = targetColumns[columnIndex];
+          if (column.primary_key || isBlobColumn(column)) {
+            setNotice(`Cannot paste into ${column.name}.`);
+            return;
+          }
+          try {
+            values[column.name] = parseCellInput(column, pastedRow[columnIndex]);
+          } catch (cause) {
+            setError(cause instanceof Error ? cause.message : String(cause));
+            return;
+          }
+        }
+        if (Object.keys(values).length > 0) {
+          changes.push({
+            row,
+            rowid: row.rowid,
+            pendingKey: row.pendingKey,
+            values,
+          });
+        }
+      }
+
+      if (changes.length === 0) return;
+
+      const insertChanges = new Map<string, JsonObject>();
+      for (const change of changes) {
+        if (!change.pendingKey) continue;
+        insertChanges.set(change.pendingKey, {
+          ...(insertChanges.get(change.pendingKey) ?? {}),
+          ...change.values,
+        });
+      }
+      if (insertChanges.size > 0) {
+        setPendingInserts((current) =>
+          current.map((insert) => {
+            const values = insertChanges.get(insert.key);
+            return values
+              ? { ...insert, values: { ...insert.values, ...values } }
+              : insert;
+          }),
+        );
+      }
+
+      const existingChanges = changes.filter(
+        (change) => !change.pendingKey && change.rowid !== null,
+      );
+      if (existingChanges.length > 0) {
+        setPendingUpdates((current) => {
+          let next = current;
+          for (const change of existingChanges) {
+            const rowid = change.rowid;
+            if (rowid === null) continue;
+            const currentUpdate = next.find((update) => update.rowid === rowid);
+            const before =
+              currentUpdate?.before ?? rowToValues(columns, change.row);
+            const merged: JsonObject = {
+              ...(currentUpdate?.values ?? {}),
+              ...change.values,
+            };
+            const changed: JsonObject = {};
+            for (const [name, candidate] of Object.entries(merged)) {
+              if (!valuesEqual(candidate, before[name])) changed[name] = candidate;
+            }
+            if (Object.keys(changed).length === 0) {
+              next = next.filter((update) => update.rowid !== rowid);
+            } else if (currentUpdate) {
+              next = next.map((update) =>
+                update.rowid === rowid ? { ...update, values: changed } : update,
+              );
+            } else {
+              next = [...next, { rowid, values: changed, before }];
+            }
+          }
+          return next;
+        });
+      }
+
+      setNotice(`Pasted ${changes.length} row(s) into pending changes`);
+    },
+    [columns, displayRows],
+  );
 
   const pagedMode = sort !== null || dataFilter !== null;
 
@@ -298,15 +596,21 @@ export default function App() {
       setLoading(true);
       setError(null);
       try {
-        const nextColumns = await api.describeTable(table);
-        const result = await api.loadPage(table, cursor, "next", size);
+        const [nextColumns, nextForeignKeys, result] = await Promise.all([
+          api.describeTable(table),
+          api.foreignKeys(table),
+          api.loadPage(table, cursor, "next", size),
+        ]);
         if (id !== requestId.current) return null;
 
         setColumns(nextColumns);
+        setForeignKeys(nextForeignKeys);
         setPage(result);
         setSelected(table);
         setPageIndex(0);
         setSelectedRow(null);
+        setSelectionKeys(new Set());
+        setLastSelectedIndex(null);
         setFilterDraft((current) => syncFilterColumn(current, nextColumns));
 
         void api
@@ -323,6 +627,7 @@ export default function App() {
         if (id === requestId.current) {
           setError(String(cause));
           setPage(null);
+          setForeignKeys([]);
         }
         return null;
       } finally {
@@ -344,21 +649,21 @@ export default function App() {
       setLoading(true);
       setError(null);
       try {
-        const nextColumns = await api.describeTable(table);
-        const result = await api.loadTablePage(
-          table,
-          activeFilter,
-          activeSort,
-          index * size,
-          size,
-        );
+        const [nextColumns, nextForeignKeys, result] = await Promise.all([
+          api.describeTable(table),
+          api.foreignKeys(table),
+          api.loadTablePage(table, activeFilter, activeSort, index * size, size),
+        ]);
         if (id !== requestId.current) return null;
 
         setColumns(nextColumns);
+        setForeignKeys(nextForeignKeys);
         setPage(result);
         setSelected(table);
         setPageIndex(index);
         setSelectedRow(null);
+        setSelectionKeys(new Set());
+        setLastSelectedIndex(null);
         setFilterDraft((current) => syncFilterColumn(current, nextColumns));
 
         if (activeFilter) {
@@ -379,6 +684,7 @@ export default function App() {
         if (id === requestId.current) {
           setError(String(cause));
           setPage(null);
+          setForeignKeys([]);
         }
         return null;
       } finally {
@@ -393,13 +699,18 @@ export default function App() {
     setDetailsLoading(true);
     setError(null);
     try {
-      const details = await api.tableDetails(table);
+      const [details, stats] = await Promise.all([
+        api.tableDetails(table),
+        api.tableStats(table),
+      ]);
       if (id !== detailsRequestId.current) return;
       setTableDetails(details);
+      setTableStats(stats);
     } catch (cause) {
       if (id === detailsRequestId.current) {
         setError(String(cause));
         setTableDetails(null);
+        setTableStats(null);
       }
     } finally {
       if (id === detailsRequestId.current) setDetailsLoading(false);
@@ -435,6 +746,7 @@ export default function App() {
     setTables(info.tables);
     setSelected(null);
     setColumns([]);
+    setForeignKeys([]);
     setPage(null);
     setCount(null);
     setFilterText("");
@@ -447,18 +759,24 @@ export default function App() {
     setSchemaGraph(null);
     setQueryResult(null);
     setQueryRunning(false);
+    setQueryPlan(null);
+    setExplainRunning(false);
     setSort(null);
     setDataFilter(null);
     setFilterDraft({ column: "", op: "contains", value: "" });
     setSelectedRow(null);
+    setSelectionKeys(new Set());
+    setLastSelectedIndex(null);
     setPendingInserts([]);
     setPendingUpdates([]);
     setPendingDeletes([]);
     setRowEditor(null);
     setSaving(false);
+    setExporting(false);
     externalChangePending.current = false;
     detailsRequestId.current += 1;
     setTableDetails(null);
+    setTableStats(null);
     setDetailsLoading(false);
     setShowAlterTable(false);
     setShowMigrations(false);
@@ -605,6 +923,8 @@ export default function App() {
       setFilterDraft((current) => ({ ...current, value: "" }));
       setPage(null);
       setColumns([]);
+      setForeignKeys([]);
+      setTableStats(null);
       setCount(null);
       setHistory([null]);
       setHistoryIndex(0);
@@ -679,6 +999,7 @@ export default function App() {
       setSqlText(statement);
       setView("sql");
       setSelectedRow(null);
+      setQueryPlan(null);
       setQueryRunning(true);
       setError(null);
 
@@ -703,6 +1024,80 @@ export default function App() {
     },
     [queryLimit],
   );
+
+  const explainQuery = useCallback(async (text: string) => {
+    const statement = text.trim();
+    if (!statement) return;
+
+    setSqlText(statement);
+    setView("sql");
+    setSelectedRow(null);
+    setExplainRunning(true);
+    setError(null);
+    try {
+      setQueryPlan(await api.explainQuery(statement));
+    } catch (cause) {
+      setQueryPlan(null);
+      setError(String(cause));
+    } finally {
+      setExplainRunning(false);
+    }
+  }, []);
+
+  const changeSqlText = useCallback((value: string) => {
+    setSqlText(value);
+    setQueryPlan(null);
+  }, []);
+
+  const exportCurrent = useCallback(async () => {
+    if (exporting) return;
+    if (guardPending()) return;
+
+    const isData = view === "data";
+    const isSql = view === "sql";
+    if (isData && !selected) return;
+    if (isSql && !sqlText.trim()) return;
+    if (!isData && !isSql) return;
+
+    const base =
+      ((isData ? selected : "query") ?? "export")
+        .replace(/[^A-Za-z0-9_-]+/g, "_")
+        .slice(0, 40) || "export";
+    try {
+      const path = await save({
+        defaultPath: `${base}-${new Date().toISOString().slice(0, 10)}.${exportFormat}`,
+        filters: [{ name: exportFormat.toUpperCase(), extensions: [exportFormat] }],
+      });
+      if (!path || Array.isArray(path)) return;
+
+      setExporting(true);
+      setError(null);
+      const result = await api.exportData({
+        table: isData ? selected : null,
+        query: isSql ? sqlText : null,
+        filter: isData ? dataFilter : null,
+        sort: isData ? sort : null,
+        format: exportFormat,
+        path,
+      });
+      setNotice(
+        `Exported ${result.rows.toLocaleString()} row(s) to ${result.path}`,
+      );
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setExporting(false);
+    }
+  }, [
+    exporting,
+    guardPending,
+    view,
+    selected,
+    sqlText,
+    exportFormat,
+    dataFilter,
+    sort,
+  ]);
 
   const nextPage = useCallback(async () => {
     if (!selected || !page) return;
@@ -870,6 +1265,7 @@ export default function App() {
           setColumns([]);
           setCount(null);
           setTableDetails(null);
+          setTableStats(null);
           setView("data");
           return;
         }
@@ -947,6 +1343,57 @@ export default function App() {
       );
     },
     [selected, guardPending, refreshAfterSchemaChange],
+  );
+
+  const openForeignKey = useCallback(
+    async (foreignKey: ForeignKeyInfo, cell: CellValue) => {
+      if (guardPending()) return;
+      if (!foreignKey.referenced_column) return;
+      if (cell.kind === "null" || cell.kind === "blob") return;
+
+      const value = String(cell.value);
+      const filter: FilterSpec = {
+        column: foreignKey.referenced_column,
+        op: "eq",
+        value,
+      };
+      setView("data");
+      setSort(null);
+      setDataFilter(filter);
+      setFilterDraft({ column: filter.column, op: filter.op, value });
+      setPageIndex(0);
+      setSelectedRow(null);
+      setPage(null);
+      setColumns([]);
+      setForeignKeys([]);
+      setTableStats(null);
+      setCount(null);
+      setHistory([null]);
+      setHistoryIndex(0);
+      await loadOffsetPage(foreignKey.referenced_table, 0, null, filter);
+    },
+    [guardPending, loadOffsetPage],
+  );
+
+  const openReferencedTable = useCallback(
+    (table: string) => {
+      if (guardPending()) return;
+      setView("data");
+      setSort(null);
+      setDataFilter(null);
+      setFilterDraft({ column: "", op: "contains", value: "" });
+      setPageIndex(0);
+      setSelectedRow(null);
+      setPage(null);
+      setColumns([]);
+      setForeignKeys([]);
+      setTableStats(null);
+      setCount(null);
+      setHistory([null]);
+      setHistoryIndex(0);
+      void loadTable(table, null);
+    },
+    [guardPending, loadTable],
   );
 
   const openMigrations = useCallback(() => {
@@ -1041,6 +1488,8 @@ export default function App() {
       setPendingDeletes([]);
       setRowEditor(null);
       setSelectedRow(null);
+      setSelectionKeys(new Set());
+      setLastSelectedIndex(null);
 
       const parts = [
         `Saved ${result.affected} change${result.affected === 1 ? "" : "s"}`,
@@ -1151,6 +1600,9 @@ export default function App() {
   const deleteSelectedRow = useCallback(() => {
     const row = selectedRow?.row;
     if (!row) return;
+    const selectionKey = selectedRow
+      ? rowSelectionKey(selectedRow.row, selectedRow.index)
+      : null;
     if (row.pendingKey) {
       setPendingInserts((current) =>
         current.filter((insert) => insert.key !== row.pendingKey),
@@ -1163,6 +1615,13 @@ export default function App() {
       setPendingDeletes((current) =>
         current.includes(rowid) ? current : [...current, rowid],
       );
+    }
+    if (selectionKey) {
+      setSelectionKeys((current) => {
+        const next = new Set(current);
+        next.delete(selectionKey);
+        return next;
+      });
     }
     setSelectedRow(null);
   }, [selectedRow]);
@@ -1251,6 +1710,7 @@ export default function App() {
               setColumns([]);
               setCount(null);
               setTableDetails(null);
+              setTableStats(null);
               return;
             }
             await loadDetails(selected);
@@ -1700,6 +2160,27 @@ export default function App() {
                           Next
                         </button>
                       </div>
+                      <span className="mx-1 h-4 w-px bg-line" />
+                      <select
+                        className={SELECT}
+                        value={exportFormat}
+                        onChange={(event) =>
+                          setExportFormat(event.target.value as ExportFormat)
+                        }
+                        aria-label="Export format"
+                      >
+                        <option value="csv">CSV</option>
+                        <option value="json">JSON</option>
+                      </select>
+                      <button
+                        className={BTN_SM_GHOST}
+                        onClick={() => void exportCurrent()}
+                        disabled={exporting || !selected}
+                        data-testid="export-data"
+                        title="Export the current table view"
+                      >
+                        {exporting ? "Exporting..." : "Export"}
+                      </button>
                     </>
                   ) : view === "structure" ? (
                     <span className={BADGE_SUBTLE}>structure</span>
@@ -1788,9 +2269,17 @@ export default function App() {
                     <button
                       className={BTN_PRIMARY}
                       onClick={() => void runQuery(sqlText)}
-                      disabled={queryRunning || !sqlText.trim()}
+                      disabled={queryRunning || explainRunning || !sqlText.trim()}
                     >
                       {queryRunning ? "Running..." : "Run"}
+                    </button>
+                    <button
+                      className={BTN_NEUTRAL}
+                      onClick={() => void explainQuery(sqlText)}
+                      disabled={queryRunning || explainRunning || !sqlText.trim()}
+                      title="Show SQLite's query plan without running the statement"
+                    >
+                      {explainRunning ? "Explaining..." : "Explain"}
                     </button>
                     <span className="whitespace-nowrap font-mono text-[10px] text-muted-2">
                       Ctrl / Cmd + Enter
@@ -1815,7 +2304,7 @@ export default function App() {
                       value=""
                       onChange={(event) => {
                         const value = event.target.value;
-                        if (value) setSqlText(value);
+                        if (value) changeSqlText(value);
                       }}
                       disabled={queryHistory.length === 0}
                       title="Query history"
@@ -1827,6 +2316,27 @@ export default function App() {
                         </option>
                       ))}
                     </select>
+                    <span className="mx-1 h-4 w-px bg-line" />
+                    <select
+                      className={SELECT}
+                      value={exportFormat}
+                      onChange={(event) =>
+                        setExportFormat(event.target.value as ExportFormat)
+                      }
+                      aria-label="Export format"
+                    >
+                      <option value="csv">CSV</option>
+                      <option value="json">JSON</option>
+                    </select>
+                    <button
+                      className={BTN_SM_GHOST}
+                      onClick={() => void exportCurrent()}
+                      disabled={exporting || !sqlText.trim()}
+                      data-testid="export-query"
+                      title="Export this query result"
+                    >
+                      {exporting ? "Exporting..." : "Export"}
+                    </button>
                     {queryResult && (
                       <span className="ml-auto whitespace-nowrap font-mono text-[11px] text-muted">
                         {queryResult.rows.length.toLocaleString()} rows
@@ -1845,12 +2355,19 @@ export default function App() {
                       <SqlEditor
                         value={sqlText}
                         schema={schema}
-                        onChange={setSqlText}
+                        onChange={changeSqlText}
                         onRun={(value) => void runQuery(value)}
                       />
                     </Suspense>
                   </div>
                 </div>
+              )}
+
+              {view === "sql" && queryPlan && (
+                <QueryPlanPanel
+                  plan={queryPlan}
+                  onClose={() => setQueryPlan(null)}
+                />
               )}
 
               {view === "diagram" ? (
@@ -1885,11 +2402,13 @@ export default function App() {
                   <StructureView
                     table={selected}
                     details={tableDetails?.name === selected ? tableDetails : null}
+                    stats={tableStats?.name === selected ? tableStats : null}
                     loading={detailsLoading}
                     onRefresh={() => void loadDetails(selected)}
                     onAlter={requestAlterTable}
                     onCreateIndex={handleCreateIndex}
                     onDropIndex={handleDropIndex}
+                    onOpenReferencedTable={openReferencedTable}
                   />
                 ) : (
                   <div className="grid flex-1 place-items-center text-xs text-muted">
@@ -1905,17 +2424,65 @@ export default function App() {
                           Loading rows...
                         </div>
                       ) : (
-                        <DataGrid
-                          columns={columns}
-                          rows={displayRows}
-                          sort={sort}
-                          onSort={toggleSort}
-                          onRowClick={(_, index) =>
-                            setSelectedRow({ row: displayRows[index], index })
-                          }
-                          selectedIndex={selectedRow?.index ?? null}
-                          dirtyRowIds={pendingRowIds}
-                        />
+                        <>
+                          {selectionKeys.size > 0 && (
+                            <div
+                              data-testid="selection-bar"
+                              className="flex h-9 flex-none items-center justify-between border-b border-line bg-accent/[0.04] px-3"
+                            >
+                              <span className="text-[11px] font-semibold text-[#b8fff4]">
+                                {selectionKeys.size} selected
+                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  className={BTN_SM_GHOST}
+                                  onClick={() => void copySelectedRows()}
+                                  data-testid="copy-selection"
+                                >
+                                  Copy TSV
+                                </button>
+                                <button
+                                  className="inline-flex h-7 items-center rounded-md border border-danger/35 bg-danger/10 px-2.5 text-[11.5px] font-medium text-[#fca5a5] hover:border-danger/60"
+                                  onClick={deleteSelectedRows}
+                                  data-testid="delete-selection"
+                                >
+                                  Delete
+                                </button>
+                                <button
+                                  className={BTN_SM_GHOST}
+                                  onClick={clearSelection}
+                                  data-testid="clear-selection"
+                                >
+                                  Clear
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          <div className="flex min-h-0 flex-1 flex-col">
+                            <DataGrid
+                              columns={columns}
+                              rows={displayRows}
+                              sort={sort}
+                              onSort={toggleSort}
+                              onRowClick={(_, index) =>
+                                setSelectedRow({ row: displayRows[index], index })
+                              }
+                              selectedIndex={selectedRow?.index ?? null}
+                              dirtyRowIds={pendingRowIds}
+                              selectionKeys={selectionKeys}
+                              allSelected={allSelected}
+                              someSelected={someSelected}
+                              onToggleRow={toggleRowSelection}
+                              onToggleAll={toggleAllSelection}
+                              onCopy={() => void copySelectedRows()}
+                              onPaste={pasteIntoCell}
+                              onClipboardError={(message) => setError(message)}
+                              onEditError={(message) => setError(message)}
+                              canEditCell={canEditCell}
+                              onCommitCell={handleCellCommit}
+                            />
+                          </div>
+                        </>
                       )
                     ) : queryRunning ? (
                       <div className="grid flex-1 place-items-center text-xs text-muted">
@@ -1958,6 +2525,12 @@ export default function App() {
                         (selectedRow.row.pendingKey !== undefined ||
                           selectedRow.row.rowid !== null)
                           ? deleteSelectedRow
+                          : undefined
+                      }
+                      foreignKeys={view === "data" ? foreignKeys : undefined}
+                      onNavigateForeignKey={
+                        view === "data"
+                          ? (foreignKey, cell) => void openForeignKey(foreignKey, cell)
                           : undefined
                       }
                     />

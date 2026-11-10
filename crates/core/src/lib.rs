@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -82,6 +83,60 @@ pub struct QueryResult {
     pub columns: Vec<ColumnInfo>,
     pub rows: Vec<Row>,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryPlanStep {
+    pub id: i64,
+    pub parent: i64,
+    pub detail: String,
+    pub full_scan: bool,
+    pub uses_index: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryPlan {
+    pub sql: String,
+    pub steps: Vec<QueryPlanStep>,
+    pub full_scans: usize,
+    pub indexes_used: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexStats {
+    pub name: String,
+    pub unique: bool,
+    pub columns: Vec<String>,
+    pub size_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TableStats {
+    pub name: String,
+    pub row_count: i64,
+    pub row_count_capped: bool,
+    pub row_count_estimated: bool,
+    pub size_bytes: Option<i64>,
+    pub index_bytes: Option<i64>,
+    pub indexes: Vec<IndexStats>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DatabaseStats {
+    pub path: String,
+    pub page_size: i64,
+    pub page_count: i64,
+    pub free_bytes: i64,
+    pub total_bytes: i64,
+    pub dbstat: bool,
+    pub tables: Vec<TableStats>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Csv,
+    Json,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1623,6 +1678,319 @@ impl Database {
         })
     }
 
+    pub fn explain_query(&self, sql: &str) -> Result<QueryPlan> {
+        let sql = sql.trim().trim_end_matches(';').trim();
+        if sql.is_empty() {
+            return Err(DbError::InvalidDesign(
+                "a query is required for EXPLAIN".to_string(),
+            ));
+        }
+
+        let explain = format!("EXPLAIN QUERY PLAN {sql}");
+        let mut statement = self.conn.prepare(&explain)?;
+        let mut rows = statement.query([])?;
+        let mut steps = Vec::new();
+        while let Some(row) = rows.next()? {
+            let detail: String = row.get(3)?;
+            let upper = detail.to_ascii_uppercase();
+            let full_scan = upper.starts_with("SCAN ")
+                && !upper.contains(" USING ")
+                && !upper.contains("SUBQUERY")
+                && !upper.contains("CONSTANT ROW");
+            let uses_index = upper.contains("USING INDEX")
+                || upper.contains("USING COVERING INDEX")
+                || upper.contains("USING INTEGER PRIMARY KEY");
+            steps.push(QueryPlanStep {
+                id: row.get(0)?,
+                parent: row.get(1)?,
+                detail,
+                full_scan,
+                uses_index,
+            });
+        }
+
+        let full_scans = steps.iter().filter(|step| step.full_scan).count();
+        let indexes_used = steps.iter().filter(|step| step.uses_index).count();
+        Ok(QueryPlan {
+            sql: sql.to_string(),
+            steps,
+            full_scans,
+            indexes_used,
+        })
+    }
+
+    pub fn database_stats(&self) -> Result<DatabaseStats> {
+        let page_size: i64 = self
+            .conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let page_count: i64 = self
+            .conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let free_pages: i64 = self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+        let dbstat = self.dbstat_sizes()?;
+        let estimates = self.row_count_estimates()?;
+        let mut tables = Vec::new();
+        for table in self.tables()? {
+            tables.push(self.stats_for_table(&table.name, dbstat.as_ref(), &estimates)?);
+        }
+        Ok(DatabaseStats {
+            path: self.path.display().to_string(),
+            page_size,
+            page_count,
+            free_bytes: free_pages * page_size,
+            total_bytes: page_count * page_size,
+            dbstat: dbstat.is_some(),
+            tables,
+        })
+    }
+
+    pub fn table_stats(&self, table: &str) -> Result<TableStats> {
+        self.ensure_table(table)?;
+        let indexes = self.indexes(Some(table))?;
+        let mut names = vec![table.to_string()];
+        names.extend(indexes.into_iter().map(|index| index.name));
+        let dbstat = self.dbstat_sizes_for(&names)?;
+        let estimates = self.row_count_estimates()?;
+        self.stats_for_table(table, dbstat.as_ref(), &estimates)
+    }
+
+    fn stats_for_table(
+        &self,
+        table: &str,
+        dbstat: Option<&HashMap<String, i64>>,
+        estimates: &HashMap<String, i64>,
+    ) -> Result<TableStats> {
+        let (row_count, row_count_capped, row_count_estimated) =
+            if let Some(estimate) = estimates.get(table) {
+                (*estimate, false, true)
+            } else {
+                let count = self.count_rows(table, 1_000_000)?;
+                (count.count, count.capped, false)
+            };
+
+        let indexes = self
+            .indexes(Some(table))?
+            .into_iter()
+            .map(|index| IndexStats {
+                size_bytes: dbstat.map(|sizes| *sizes.get(&index.name).unwrap_or(&0)),
+                name: index.name,
+                unique: index.unique,
+                columns: index.columns,
+            })
+            .collect::<Vec<_>>();
+        let size_bytes = dbstat.map(|sizes| *sizes.get(table).unwrap_or(&0));
+        let index_bytes = if size_bytes.is_some() {
+            Some(
+                indexes
+                    .iter()
+                    .filter_map(|index| index.size_bytes)
+                    .sum::<i64>(),
+            )
+        } else {
+            None
+        };
+
+        Ok(TableStats {
+            name: table.to_string(),
+            row_count,
+            row_count_capped,
+            row_count_estimated,
+            size_bytes,
+            index_bytes,
+            indexes,
+        })
+    }
+
+    fn row_count_estimates(&self) -> Result<HashMap<String, i64>> {
+        let exists: i64 = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'sqlite_stat1'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Ok(HashMap::new());
+        }
+
+        let mut statement = self.conn.prepare("SELECT tbl, stat FROM sqlite_stat1")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut estimates = HashMap::new();
+        for row in rows {
+            let (table, stat) = row?;
+            if let Some(estimate) = stat
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<i64>().ok())
+            {
+                estimates.entry(table).or_insert(estimate);
+            }
+        }
+        Ok(estimates)
+    }
+
+    fn dbstat_sizes(&self) -> Result<Option<HashMap<String, i64>>> {
+        let mut statement = match self
+            .conn
+            .prepare("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name")
+        {
+            Ok(statement) => statement,
+            Err(_) => return Ok(None),
+        };
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut sizes = HashMap::new();
+        for row in rows {
+            let (name, size) = row?;
+            sizes.insert(name, size);
+        }
+        Ok(Some(sizes))
+    }
+
+    fn dbstat_sizes_for(&self, names: &[String]) -> Result<Option<HashMap<String, i64>>> {
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let placeholders = vec!["?"; names.len()].join(", ");
+        let sql = format!(
+            "SELECT name, SUM(pgsize) FROM dbstat WHERE name IN ({placeholders}) GROUP BY name"
+        );
+        let mut statement = match self.conn.prepare(&sql) {
+            Ok(statement) => statement,
+            Err(_) => return Ok(None),
+        };
+        let rows = statement.query_map(rusqlite::params_from_iter(names.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut sizes = HashMap::new();
+        for row in rows {
+            let (name, size) = row?;
+            sizes.insert(name, size);
+        }
+        Ok(Some(sizes))
+    }
+
+    pub fn export_query(
+        &self,
+        sql: &str,
+        format: ExportFormat,
+        writer: &mut dyn Write,
+    ) -> Result<usize> {
+        let sql = sql.trim().trim_end_matches(';');
+        if sql.is_empty() {
+            return Err(DbError::InvalidDesign(
+                "a query is required for export".to_string(),
+            ));
+        }
+        let mut statement = self.conn.prepare(sql)?;
+        if !statement.readonly() {
+            return Err(DbError::ReadOnly);
+        }
+        self.export_statement(&mut statement, &[], format, writer)
+    }
+
+    pub fn export_table(
+        &self,
+        table: &str,
+        filter: Option<&FilterSpec>,
+        sort: Option<&SortSpec>,
+        format: ExportFormat,
+        writer: &mut dyn Write,
+    ) -> Result<usize> {
+        self.ensure_table(table)?;
+        let columns = self.columns(table)?;
+        let (where_sql, params) = match filter {
+            Some(filter) => filter_clause(filter, &columns)?,
+            None => (String::new(), Vec::new()),
+        };
+        let order_sql = if let Some(sort) = sort {
+            if !columns.iter().any(|column| column.name == sort.column) {
+                return Err(DbError::UnknownColumn(sort.column.clone()));
+            }
+            let direction = match sort.direction {
+                SortDirection::Asc => "ASC",
+                SortDirection::Desc => "DESC",
+            };
+            format!(" ORDER BY {} {direction}", quote_ident(&sort.column))
+        } else {
+            String::new()
+        };
+        let sql = format!("SELECT * FROM {}{where_sql}{order_sql}", quote_ident(table));
+        let mut statement = self.conn.prepare(&sql)?;
+        self.export_statement(&mut statement, &params, format, writer)
+    }
+
+    fn export_statement(
+        &self,
+        statement: &mut rusqlite::Statement<'_>,
+        params: &[rusqlite::types::Value],
+        format: ExportFormat,
+        writer: &mut dyn Write,
+    ) -> Result<usize> {
+        let columns = statement
+            .column_names()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        let mut rows = statement.query(rusqlite::params_from_iter(params.iter()))?;
+
+        match format {
+            ExportFormat::Csv => {
+                writeln!(
+                    writer,
+                    "{}",
+                    columns
+                        .iter()
+                        .map(|column| csv_escape(column))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )?;
+                let mut count = 0;
+                while let Some(row) = rows.next()? {
+                    let mut fields = Vec::with_capacity(columns.len());
+                    for index in 0..columns.len() {
+                        fields.push(csv_value(row.get_ref(index)?));
+                    }
+                    writeln!(
+                        writer,
+                        "{}",
+                        fields
+                            .iter()
+                            .map(|field| csv_escape(field))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )?;
+                    count += 1;
+                }
+                Ok(count)
+            }
+            ExportFormat::Json => {
+                write!(writer, "[")?;
+                let mut first = true;
+                let mut count = 0;
+                while let Some(row) = rows.next()? {
+                    if !first {
+                        write!(writer, ",")?;
+                    }
+                    first = false;
+                    let mut object = serde_json::Map::new();
+                    for (index, name) in columns.iter().enumerate() {
+                        object.insert(name.clone(), export_json(row.get_ref(index)?));
+                    }
+                    serde_json::to_writer(&mut *writer, &object)?;
+                    count += 1;
+                }
+                writeln!(writer, "]")?;
+                Ok(count)
+            }
+        }
+    }
+
     pub fn count_rows(&self, table: &str, cap: i64) -> Result<CountResult> {
         self.ensure_table(table)?;
         let quoted = quote_ident(table);
@@ -2823,6 +3191,8 @@ The database is `{{DATABASE}}` in this folder. Never edit the database file dire
 - `dbgo query . "select * from companies limit 20" --json`
 - `dbgo page . companies --limit 50`
 - `dbgo count . companies`
+- `dbgo explain . "select ..." --json` — query plan without executing it
+- `dbgo stats . --json` — page, table, and index sizes
 
 ## Write data
 
@@ -2855,12 +3225,27 @@ dbgo delete . companies \
 - Updating primary key columns is not supported.
 - Every write creates a timestamped backup and an audit row.
 
+## Export
+
+```bash
+dbgo export . companies --format csv --output companies.csv
+dbgo export . companies --format json --where '{"column":"id","op":"gte","value":1}'
+dbgo export . --query "select * from companies order by id" --format json --output result.json
+```
+
+- Exports are read-only and do not create backups.
+- Omit `--output` to write data to stdout.
+- BLOB values are base64-encoded.
+
 ## GUI edits
 
 The desktop app stages row edits and writes them only when the user clicks
 **Save changes**. Each save creates one backup and one audit session. The app
 does not reload the current page while edits are staged, so an agent can write
 safely and the user decides when to reload.
+
+Cells can be edited inline, selected in bulk, and copied/pasted as TSV. All of
+that stays pending until **Save changes**.
 
 ## Create tables
 
@@ -3186,6 +3571,41 @@ fn cell_to_json(value: ValueRef<'_>) -> serde_json::Value {
             .unwrap_or_else(|| serde_json::Value::String(f.to_string())),
         ValueRef::Text(t) => serde_json::Value::String(String::from_utf8_lossy(t).into_owned()),
         ValueRef::Blob(b) => serde_json::Value::String(format!("<blob {} bytes>", b.len())),
+    }
+}
+
+fn export_json(value: ValueRef<'_>) -> serde_json::Value {
+    match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(n) => serde_json::Value::Number(n.into()),
+        ValueRef::Real(f) => serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or_else(|| serde_json::Value::String(f.to_string())),
+        ValueRef::Text(t) => serde_json::Value::String(String::from_utf8_lossy(t).into_owned()),
+        ValueRef::Blob(b) => {
+            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
+        }
+    }
+}
+
+fn csv_value(value: ValueRef<'_>) -> String {
+    match value {
+        ValueRef::Null => String::new(),
+        ValueRef::Integer(n) => n.to_string(),
+        ValueRef::Real(f) => f.to_string(),
+        ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+        ValueRef::Blob(b) => base64::engine::general_purpose::STANDARD.encode(b),
+    }
+}
+
+fn csv_escape(value: &str) -> String {
+    if value
+        .chars()
+        .any(|character| matches!(character, ',' | '"' | '\n' | '\r'))
+    {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
     }
 }
 
@@ -4442,6 +4862,98 @@ mod tests {
 
         assert!(db.ensure_agent_files().is_err());
         assert!(!dir.path().join("AGENTS.md").exists());
+    }
+
+    #[test]
+    fn reports_table_and_database_stats() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[
+                json_row(&[
+                    ("id", serde_json::json!(1)),
+                    ("domain", serde_json::json!("acme.test")),
+                    ("city", serde_json::json!("Berlin")),
+                ]),
+                json_row(&[
+                    ("id", serde_json::json!(2)),
+                    ("domain", serde_json::json!("globex.test")),
+                    ("city", serde_json::json!("Austin")),
+                ]),
+            ],
+        )
+        .unwrap();
+
+        let table = db.table_stats("companies").unwrap();
+        assert_eq!(table.row_count, 2);
+        assert!(!table.row_count_estimated);
+        assert!(!table.indexes.is_empty());
+        assert!(table.size_bytes.is_some());
+        assert!(table.size_bytes.unwrap() > 0);
+
+        let stats = db.database_stats().unwrap();
+        assert!(stats.dbstat);
+        assert!(stats.total_bytes > 0);
+        assert!(stats
+            .tables
+            .iter()
+            .any(|candidate| candidate.name == "companies"));
+    }
+
+    #[test]
+    fn exports_table_and_query_results() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+                ("city", serde_json::json!("Ber, \"lin\"\nline")),
+            ])],
+        )
+        .unwrap();
+
+        let mut csv = Vec::new();
+        let rows = db
+            .export_table("companies", None, None, ExportFormat::Csv, &mut csv)
+            .unwrap();
+        assert_eq!(rows, 1);
+        let csv = String::from_utf8(csv).unwrap();
+        assert!(csv.starts_with("id,domain,city\n"));
+        assert!(csv.contains("\"Ber, \"\"lin\"\"\nline\""));
+
+        let mut json = Vec::new();
+        let rows = db
+            .export_query(
+                "SELECT domain, city FROM companies",
+                ExportFormat::Json,
+                &mut json,
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 1);
+        assert_eq!(parsed[0]["domain"], "acme.test");
+
+        let mut rejected = Vec::new();
+        assert!(matches!(
+            db.export_query("DELETE FROM companies", ExportFormat::Csv, &mut rejected),
+            Err(DbError::ReadOnly)
+        ));
+    }
+
+    #[test]
+    fn explains_query_plans_and_flags_full_scans() {
+        let (_dir, db) = temp_companies_db();
+        let indexed = db
+            .explain_query("SELECT * FROM companies WHERE domain = 'acme.test'")
+            .unwrap();
+        assert!(!indexed.steps.is_empty());
+        assert!(indexed.indexes_used >= 1);
+        assert_eq!(indexed.full_scans, 0);
+
+        let full_scan = db.explain_query("SELECT * FROM companies").unwrap();
+        assert!(full_scan.full_scans >= 1);
     }
 
     #[test]

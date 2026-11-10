@@ -4,12 +4,17 @@ import type {
   BackupInfo,
   ColumnInfo,
   CountResult,
+  DatabaseStats,
   DbInfo,
+  ExportFormat,
+  ExportResponse,
   FilterSpec,
+  ForeignKeyInfo,
   JsonObject,
   MigrationInfo,
   MigrateResult,
   Page,
+  QueryPlan,
   QueryResult,
   RestoreResult,
   RowUpdate,
@@ -20,6 +25,7 @@ import type {
   TableDesign,
   TableDetails,
   TableInfo,
+  TableStats,
   WriteResult,
 } from "../types";
 
@@ -57,6 +63,18 @@ export const api = {
   dataVersion: () => invoke<number>("data_version"),
   loadPage: (table: string, cursor: number | null, direction: "next" | "prev", limit: number) =>
     invoke<Page>("load_page", { table, cursor, direction, limit }),
+  foreignKeys: (table: string) => invoke<ForeignKeyInfo[]>("foreign_keys", { table }),
+  explainQuery: (sql: string) => invoke<QueryPlan>("explain_query", { sql }),
+  databaseStats: () => invoke<DatabaseStats>("database_stats"),
+  tableStats: (table: string) => invoke<TableStats>("table_stats", { table }),
+  exportData: (args: {
+    table: string | null;
+    query: string | null;
+    filter: FilterSpec | null;
+    sort: SortSpec | null;
+    format: ExportFormat;
+    path: string;
+  }) => invoke<ExportResponse>("export_data", args),
   loadTablePage: (
     table: string,
     filter: FilterSpec | null,

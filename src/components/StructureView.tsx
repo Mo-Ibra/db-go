@@ -1,16 +1,18 @@
 import { useEffect, useState } from "react";
-import type { IndexInfo, TableDetails } from "../types";
+import type { IndexInfo, TableDetails, TableStats } from "../types";
 import { copyText } from "../lib/clipboard";
 import { cn } from "../lib/cn";
 
 type StructureViewProps = {
   table: string;
   details: TableDetails | null;
+  stats: TableStats | null;
   loading: boolean;
   onRefresh: () => void;
   onAlter: () => void;
   onCreateIndex: (name: string, columns: string[], unique: boolean) => Promise<void>;
   onDropIndex: (name: string) => Promise<void>;
+  onOpenReferencedTable?: (table: string) => void;
 };
 
 const BTN =
@@ -36,12 +38,33 @@ function originLabel(origin: string): string {
   }
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-lg border border-line bg-ink/50 px-3 py-2">
+      <div className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-muted-2">
+        {label}
+      </div>
+      <div className="mt-1 font-mono text-[15px] text-fg">{value}</div>
+      {hint && <div className="mt-0.5 text-[10px] text-muted-2">{hint}</div>}
+    </div>
+  );
+}
+
 function IndexRow({
   index,
+  sizeBytes,
   busy,
   onDrop,
 }: {
   index: IndexInfo;
+  sizeBytes?: number | null;
   busy: boolean;
   onDrop: (name: string) => void;
 }) {
@@ -62,6 +85,7 @@ function IndexRow({
         <div className="mt-0.5 truncate font-mono text-[10.5px] text-muted">
           {index.columns.join(", ") || "(no columns)"}
           {index.partial ? " · partial" : ""}
+          {sizeBytes !== undefined && sizeBytes !== null ? ` · ${formatBytes(sizeBytes)}` : ""}
         </div>
       </div>
       {index.sql ? (
@@ -83,11 +107,13 @@ function IndexRow({
 export function StructureView({
   table,
   details,
+  stats,
   loading,
   onRefresh,
   onAlter,
   onCreateIndex,
   onDropIndex,
+  onOpenReferencedTable,
 }: StructureViewProps) {
   const [copied, setCopied] = useState(false);
   const [showIndexForm, setShowIndexForm] = useState(false);
@@ -192,6 +218,47 @@ export function StructureView({
             {actionError}
           </div>
         )}
+
+        <section className={CARD}>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h3 className={LABEL}>Storage</h3>
+            {stats?.row_count_estimated && (
+              <span className="text-[10px] text-muted-2">rows from sqlite_stat1</span>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <Metric
+              label="Rows"
+              value={
+                stats
+                  ? stats.row_count_capped
+                    ? `${stats.row_count.toLocaleString()}+`
+                    : stats.row_count_estimated
+                      ? `~${stats.row_count.toLocaleString()}`
+                      : stats.row_count.toLocaleString()
+                  : "—"
+              }
+              hint={stats?.row_count_capped ? "capped" : undefined}
+            />
+            <Metric
+              label="Table size"
+              value={stats?.size_bytes != null ? formatBytes(stats.size_bytes) : "—"}
+            />
+            <Metric
+              label="Index size"
+              value={stats?.index_bytes != null ? formatBytes(stats.index_bytes) : "—"}
+            />
+            <Metric
+              label="Indexes"
+              value={details.indexes.length.toLocaleString()}
+            />
+          </div>
+          {stats && stats.size_bytes === null && (
+            <p className="mt-2 text-[10.5px] text-muted-2">
+              Page sizes are unavailable because the SQLite build has no <span className="font-mono">dbstat</span> table.
+            </p>
+          )}
+        </section>
 
         <section className={CARD}>
           <div className="mb-2 flex items-center justify-between gap-2">
@@ -326,6 +393,10 @@ export function StructureView({
                 <IndexRow
                   key={index.name}
                   index={index}
+                  sizeBytes={
+                    stats?.indexes.find((candidate) => candidate.name === index.name)
+                      ?.size_bytes
+                  }
                   busy={dropping === index.name}
                   onDrop={(name) => void dropIndex(name)}
                 />
@@ -343,13 +414,27 @@ export function StructureView({
               {details.foreign_keys.map((foreignKey) => (
                 <div
                   key={`${foreignKey.column}-${foreignKey.referenced_table}-${foreignKey.referenced_column}`}
-                  className="rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-[11.5px] text-fg"
+                  className="flex items-center justify-between gap-3 rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-[11.5px] text-fg"
                 >
-                  {foreignKey.column} → {foreignKey.referenced_table}.
-                  {foreignKey.referenced_column}
-                  <span className="ml-2 text-muted-2">
-                    ON DELETE {foreignKey.on_delete} · ON UPDATE {foreignKey.on_update}
-                  </span>
+                  <div className="min-w-0">
+                    <span>
+                      {foreignKey.column} → {foreignKey.referenced_table}.
+                      {foreignKey.referenced_column}
+                    </span>
+                    <span className="ml-2 text-muted-2">
+                      ON DELETE {foreignKey.on_delete} · ON UPDATE {foreignKey.on_update}
+                    </span>
+                  </div>
+                  {onOpenReferencedTable && (
+                    <button
+                      type="button"
+                      className="flex-none rounded-md border border-line px-2 py-1 text-[10.5px] text-muted hover:border-accent/40 hover:text-accent"
+                      onClick={() => onOpenReferencedTable(foreignKey.referenced_table)}
+                      title={`Open ${foreignKey.referenced_table}`}
+                    >
+                      Open
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

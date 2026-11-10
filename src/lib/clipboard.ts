@@ -15,3 +15,11 @@ export async function copyText(text: string): Promise<void> {
   document.execCommand("copy");
   textarea.remove();
 }
+
+export async function readClipboardText(): Promise<string | null> {
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    return null;
+  }
+}

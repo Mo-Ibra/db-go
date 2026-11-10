@@ -28,10 +28,14 @@ What's here so far:
 - Row count capped at 1,000,000 to avoid expensive full counts
 - NULL / integer / real / text / BLOB cell rendering
 - SQL editor (CodeMirror 6) with schema-aware autocomplete and `Ctrl/Cmd+Enter`
+- Query plan explorer with full-scan and index warnings
+- Clickable foreign-key navigation from row details
+- Table/index size stats and CSV/JSON result export
 - Query history and read-only query results in the same grid
 - Click-to-sort columns, server-side filtering, and a row detail panel
 - Interactive ERD diagram: foreign-key edges, auto-layout, search, drag positions
 - GUI data editing with staged changes and one explicit **Save changes**
+- Inline cell editing, multi-row selection, and TSV copy/paste
 - Backup browser and safe restore with an automatic pre-restore snapshot
 - CLI writes: insert, upsert, update, delete, with automatic backups and audit
 - Live refresh when the CLI changes the open database
@@ -86,6 +90,10 @@ dbgo schema  ./samples/companies.db companies
 dbgo count   ./samples/companies.db companies
 dbgo page    ./samples/companies.db companies --limit 50 --cursor 201
 dbgo query   ./samples/companies.db "select id, name, city from companies limit 20"
+dbgo explain ./samples/companies.db "select * from companies where domain = 'acme.test'"
+dbgo stats   ./samples/companies.db
+dbgo export  ./samples/companies.db companies --format csv --output companies.csv
+dbgo export  ./samples/companies.db --query "select * from companies" --format json --output companies.json
 
 # project commands (run inside the project folder)
 cd database
@@ -278,7 +286,14 @@ rows and the **Save changes** bar shows how many rows are new, edited, or
 deleted.
 
 - **+ Row** opens the row editor and adds a pending insert.
+- **Double-click a cell** (or press `Enter`/`F2`) to edit inline.
+  - `Enter` stages the cell, `Tab` stages and moves, `Esc` cancels.
+  - Type `<NULL>` to set a nullable cell to NULL.
 - The row detail panel has **Edit row** and **Delete row** actions.
+- Use row checkboxes to select multiple rows; `Shift` extends the range.
+- **Copy TSV** copies selected rows with a header row. `Ctrl/Cmd+C` works from
+  the grid, and `Ctrl/Cmd+V` pastes TSV blocks starting at the active cell.
+- **Delete** stages selected rows for deletion; **Clear** only clears selection.
 - **Save changes** commits every staged change in one transaction, with one
   timestamped backup and one audit session.
 - **Discard** throws away all staged changes without touching the database.
@@ -302,6 +317,62 @@ Open a database, select a table, and switch to the **SQL** tab. The editor is
 prefilled with a `SELECT`, and `Ctrl/Cmd+Enter` runs the current statement.
 Results appear in the same virtualized grid. The GUI SQL editor is **read-only**;
 use the staging grid or the CLI for writes.
+
+Click **Explain** to see SQLite's query plan without running the statement:
+
+```bash
+dbgo explain . "select * from companies where domain = 'acme.test'"
+dbgo --json explain . "select ..."
+```
+
+The plan panel highlights:
+- `⚠ SCAN table` — a full table scan
+- `↗ SEARCH ... USING INDEX` / `USING COVERING INDEX` — an index lookup
+- `USE TEMP B-TREE` — a sort that may need attention
+
+## Foreign-key navigation
+
+In the data view, click a row to open its details. FK values are links:
+
+- Clicking one opens the referenced table filtered to that exact key.
+- The filter bar shows the column and value used.
+- The Structure tab also lists foreign keys with an **Open** action for the
+  referenced table.
+
+## Size stats
+
+The **Structure** tab has a Storage card showing:
+
+- row count
+- table size
+- index size
+- index count
+
+```bash
+dbgo stats . 
+dbgo --json stats .
+```
+
+- Uses SQLite's `dbstat` table for page sizes when available.
+- Uses `sqlite_stat1` row estimates when present, otherwise a capped row count.
+- Per-index sizes appear under the index list.
+
+## Export
+
+Export the current table view with its active filter and sort, or export a SQL
+query:
+
+```bash
+dbgo export . companies --format csv --output companies.csv
+dbgo export . companies --format json --where '{"column":"id","op":"gte","value":1}'
+dbgo export . --query "select * from companies order by id" --format json --output companies.json
+```
+
+- The Data view has a CSV/JSON picker and **Export** button.
+- The SQL view exports the current query without applying the Max rows limit.
+- Exports are read-only and do not create backups.
+- BLOB values are base64-encoded.
+- Omitting `--output` writes data to stdout and the row count to stderr.
 
 ## Sort, filter, inspect
 
@@ -355,8 +426,6 @@ src/             React UI (Vite)
 
 ## Next
 
-- Large-database debugging: `EXPLAIN QUERY PLAN`, index usage, FK navigation, result export
-- Inline cell editing, multi-row selection, and copy/paste
 - Postgres and MySQL drivers
 - D1 export and deploy
 - Installers and release CI

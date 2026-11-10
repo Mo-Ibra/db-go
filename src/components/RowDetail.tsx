@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { CellValue, ColumnInfo, Row } from "../types";
+import type { CellValue, ColumnInfo, ForeignKeyInfo, Row } from "../types";
 import { cn } from "../lib/cn";
 import { copyText } from "../lib/clipboard";
 
@@ -11,6 +11,8 @@ type RowDetailProps = {
   onEdit?: () => void;
   onDelete?: () => void;
   pending?: boolean;
+  foreignKeys?: ForeignKeyInfo[];
+  onNavigateForeignKey?: (foreignKey: ForeignKeyInfo, cell: CellValue) => void;
 };
 
 function formatBytes(bytes: number): string {
@@ -68,6 +70,8 @@ export function RowDetail({
   onEdit,
   onDelete,
   pending,
+  foreignKeys,
+  onNavigateForeignKey,
 }: RowDetailProps) {
   const [copied, setCopied] = useState<"json" | "csv" | null>(null);
 
@@ -117,19 +121,50 @@ export function RowDetail({
 
       <div className="min-h-0 flex-1 overflow-auto p-3">
         <div className="flex flex-col gap-2.5">
-          {columns.map((column, i) => (
-            <div key={`${column.name}-${i}`}>
-              <div className="flex items-baseline gap-1.5 font-mono text-[9.5px] font-semibold uppercase tracking-[0.08em] text-muted-2">
-                <span>{column.name}</span>
-                <span className="normal-case tracking-normal text-muted-2/70">
-                  {column.type_name}
-                </span>
+          {columns.map((column, i) => {
+            const cell = row.cells[i];
+            const foreignKey = foreignKeys?.find(
+              (candidate) => candidate.column === column.name,
+            );
+            return (
+              <div key={`${column.name}-${i}`}>
+                <div className="flex items-baseline gap-1.5 font-mono text-[9.5px] font-semibold uppercase tracking-[0.08em] text-muted-2">
+                  <span>{column.name}</span>
+                  <span className="normal-case tracking-normal text-muted-2/70">
+                    {column.type_name}
+                  </span>
+                  {foreignKey && (
+                    <span
+                      className="rounded-full border border-[#60a5fa]/30 bg-[#60a5fa]/10 px-1.5 py-0.5 text-[8.5px] text-[#93c5fd]"
+                      title={`References ${foreignKey.referenced_table}.${foreignKey.referenced_column}`}
+                    >
+                      FK
+                    </span>
+                  )}
+                </div>
+                <div className="mt-0.5 break-words font-mono text-[11.5px]">
+                  {foreignKey &&
+                  onNavigateForeignKey &&
+                  cell.kind !== "null" &&
+                  cell.kind !== "blob" ? (
+                    <button
+                      type="button"
+                      title={`Open ${foreignKey.referenced_table}.${foreignKey.referenced_column}`}
+                      className="group inline-flex flex-wrap items-center gap-1.5 text-left hover:text-accent"
+                      onClick={() => onNavigateForeignKey(foreignKey, cell)}
+                    >
+                      {renderValue(cell)}
+                      <span className="text-[10px] text-accent/80 group-hover:text-accent">
+                        ↗ {foreignKey.referenced_table}.{foreignKey.referenced_column}
+                      </span>
+                    </button>
+                  ) : (
+                    renderValue(cell)
+                  )}
+                </div>
               </div>
-              <div className="mt-0.5 break-words font-mono text-[11.5px]">
-                {renderValue(row.cells[i])}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
