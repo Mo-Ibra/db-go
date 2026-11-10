@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use db_go_core::{
-    CellValue, ColumnInfo, CountResult, Database, Direction, FilterSpec, JsonObject, Page,
-    QueryResult, SchemaGraph, SessionSummary, TableDesign, TableInfo, WriteResult,
+    AlterTableOp, CellValue, ColumnDesign, ColumnInfo, CountResult, Database, Direction,
+    FilterSpec, IndexInfo, JsonObject, MigrateResult, MigrationInfo, Page, QueryResult,
+    SchemaChange, SchemaGraph, SessionSummary, TableDesign, TableInfo, ViewInfo, WriteResult,
 };
 use serde::Serialize;
 
@@ -46,6 +47,48 @@ enum Command {
         #[arg(long)]
         file: PathBuf,
     },
+
+    /// Alter an existing table: add, rename, or drop columns.
+    AlterTable {
+        db: PathBuf,
+        table: String,
+        /// JSON file with `{"operations":[...]}` or a JSON array.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Add a column from a JSON ColumnDesign object (repeatable).
+        #[arg(long = "add-column", value_name = "JSON")]
+        add_columns: Vec<String>,
+        /// Rename a column as FROM=TO (repeatable).
+        #[arg(long = "rename-column", value_name = "FROM=TO")]
+        rename_columns: Vec<String>,
+        /// Drop a column (requires --yes when applying).
+        #[arg(long = "drop-column", value_name = "NAME")]
+        drop_columns: Vec<String>,
+        /// Print the SQL without applying it.
+        #[arg(long)]
+        sql_only: bool,
+        /// Confirm destructive operations.
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Manage indexes.
+    Index {
+        #[command(subcommand)]
+        command: IndexCommand,
+    },
+
+    /// Manage views.
+    View {
+        #[command(subcommand)]
+        command: ViewCommand,
+    },
+
+    /// List applied and pending migrations.
+    Migrations { db: PathBuf },
+
+    /// Apply pending .sql migrations in order.
+    Migrate { db: PathBuf },
 
     /// Back up the database.
     Backup { db: PathBuf },
@@ -132,6 +175,53 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum IndexCommand {
+    /// Create an index on one or more columns.
+    Create {
+        db: PathBuf,
+        table: String,
+        #[arg(long)]
+        name: String,
+        /// Comma-separated column names.
+        #[arg(long)]
+        columns: String,
+        #[arg(long)]
+        unique: bool,
+    },
+    /// Drop an index.
+    Drop {
+        db: PathBuf,
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List indexes, optionally for one table.
+    List { db: PathBuf, table: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum ViewCommand {
+    /// Create a view from a SELECT statement.
+    Create {
+        db: PathBuf,
+        name: String,
+        #[arg(long, conflicts_with = "file")]
+        sql: Option<String>,
+        #[arg(long, conflicts_with = "sql")]
+        file: Option<PathBuf>,
+    },
+    /// Drop a view.
+    Drop {
+        db: PathBuf,
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List views.
+    List { db: PathBuf },
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum DirectionArg {
     Next,
@@ -191,6 +281,122 @@ fn run(cli: Cli) -> Result<(), String> {
             let table = database.create_table(&design).map_err(err)?;
             println!("created table {}", table.name);
             Ok(())
+        }
+        Command::AlterTable {
+            db,
+            table,
+            file,
+            add_columns,
+            rename_columns,
+            drop_columns,
+            sql_only,
+            yes,
+        } => {
+            let operations = build_alter_operations(
+                file.as_deref(),
+                &add_columns,
+                &rename_columns,
+                &drop_columns,
+            )?;
+            if operations.is_empty() {
+                return Err("no alter-table operations were provided".to_string());
+            }
+            if !sql_only
+                && !yes
+                && operations
+                    .iter()
+                    .any(|operation| matches!(operation, AlterTableOp::DropColumn { .. }))
+            {
+                return Err("refusing to drop a column without --yes".to_string());
+            }
+
+            let database = open(&db)?;
+            if sql_only {
+                let statements = database
+                    .preview_alter_table(&table, &operations)
+                    .map_err(err)?;
+                print_line(&statements.join(";\n"))
+            } else {
+                let change = database.alter_table(&table, &operations).map_err(err)?;
+                output_schema_change(&change, cli.json, cli.jsonl)
+            }
+        }
+        Command::Index { command } => match command {
+            IndexCommand::Create {
+                db,
+                table,
+                name,
+                columns,
+                unique,
+            } => {
+                let columns = columns
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|column| !column.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                let database = open(&db)?;
+                let change = database
+                    .create_index(&table, &name, &columns, unique)
+                    .map_err(err)?;
+                output_schema_change(&change, cli.json, cli.jsonl)
+            }
+            IndexCommand::Drop { db, name, yes } => {
+                if !yes {
+                    return Err("refusing to drop an index without --yes".to_string());
+                }
+                let database = open(&db)?;
+                let change = database.drop_index(&name).map_err(err)?;
+                output_schema_change(&change, cli.json, cli.jsonl)
+            }
+            IndexCommand::List { db, table } => {
+                let database = open(&db)?;
+                let indexes = database.indexes(table.as_deref()).map_err(err)?;
+                output_indexes(&indexes, cli.json, cli.jsonl)
+            }
+        },
+        Command::View { command } => match command {
+            ViewCommand::Create {
+                db,
+                name,
+                sql,
+                file,
+            } => {
+                let select_sql = match (sql, file) {
+                    (Some(sql), None) => sql,
+                    (None, Some(file)) => std::fs::read_to_string(&file).map_err(err)?,
+                    (None, None) => {
+                        return Err("view create needs --sql or --file".to_string());
+                    }
+                    (Some(_), Some(_)) => unreachable!("clap rejects conflicting args"),
+                };
+                let database = open(&db)?;
+                let change = database.create_view(&name, &select_sql).map_err(err)?;
+                output_schema_change(&change, cli.json, cli.jsonl)
+            }
+            ViewCommand::Drop { db, name, yes } => {
+                if !yes {
+                    return Err("refusing to drop a view without --yes".to_string());
+                }
+                let database = open(&db)?;
+                let change = database.drop_view(&name).map_err(err)?;
+                output_schema_change(&change, cli.json, cli.jsonl)
+            }
+            ViewCommand::List { db } => {
+                let database = open(&db)?;
+                let views = database.views().map_err(err)?;
+                output_views(&views, cli.json, cli.jsonl)
+            }
+        },
+        Command::Migrations { db } => {
+            let database = open(&db)?;
+            let migrations = database.migrations().map_err(err)?;
+            output_migrations(&migrations, cli.json, cli.jsonl)
+        }
+        Command::Migrate { db } => {
+            let database = open(&db)?;
+            let result = database.apply_migrations().map_err(err)?;
+            output_migrate(&result, cli.json, cli.jsonl)
         }
         Command::Backup { db } => {
             let database = open(&db)?;
@@ -409,6 +615,164 @@ fn read_jsonl(path: &Path) -> Result<Vec<JsonObject>, String> {
         return Err(format!("no rows found in {}", path.display()));
     }
     Ok(rows)
+}
+
+fn build_alter_operations(
+    file: Option<&Path>,
+    add_columns: &[String],
+    rename_columns: &[String],
+    drop_columns: &[String],
+) -> Result<Vec<AlterTableOp>, String> {
+    let mut operations = Vec::new();
+
+    if let Some(path) = file {
+        let content = std::fs::read_to_string(path).map_err(err)?;
+        let value: serde_json::Value = serde_json::from_str(&content).map_err(err)?;
+        let operations_value = if value.is_array() {
+            value
+        } else if let Some(operations) = value.get("operations") {
+            operations.clone()
+        } else {
+            return Err(format!(
+                "{}: expected a JSON array or an object with an operations array",
+                path.display()
+            ));
+        };
+        let parsed: Vec<AlterTableOp> = serde_json::from_value(operations_value).map_err(err)?;
+        operations.extend(parsed);
+    }
+
+    for spec in add_columns {
+        let column: ColumnDesign = serde_json::from_str(spec).map_err(err)?;
+        operations.push(AlterTableOp::AddColumn { column });
+    }
+    for spec in rename_columns {
+        let (from, to) = spec
+            .split_once('=')
+            .or_else(|| spec.split_once(':'))
+            .ok_or_else(|| format!("rename expects FROM=TO: {spec}"))?;
+        operations.push(AlterTableOp::RenameColumn {
+            from: from.trim().to_string(),
+            to: to.trim().to_string(),
+        });
+    }
+    for name in drop_columns {
+        operations.push(AlterTableOp::DropColumn {
+            name: name.trim().to_string(),
+        });
+    }
+
+    Ok(operations)
+}
+
+fn output_schema_change(change: &SchemaChange, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(change);
+    }
+    if jsonl {
+        return write_jsonl(std::slice::from_ref(change));
+    }
+
+    print_line(&format!(
+        "migration {} · session {} · backup {}",
+        change.migration_name,
+        change.session_id,
+        change.backup_path.as_deref().unwrap_or("-")
+    ))?;
+    if let Some(path) = &change.migration_path {
+        print_line(&format!("file {path}"))?;
+    }
+    for statement in &change.statements {
+        print_line(&format!("{};", statement.trim().trim_end_matches(';')))?;
+    }
+    Ok(())
+}
+
+fn output_indexes(indexes: &[IndexInfo], json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(indexes);
+    }
+    if jsonl {
+        return write_jsonl(indexes);
+    }
+
+    let mut table = human_table();
+    table.set_header(vec!["name", "table", "unique", "columns", "origin"]);
+    for index in indexes {
+        table.add_row(vec![
+            index.name.clone(),
+            index.table.clone(),
+            yes_no(index.unique),
+            index.columns.join(", "),
+            index.origin.clone(),
+        ]);
+    }
+    print_table(table)
+}
+
+fn output_views(views: &[ViewInfo], json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(views);
+    }
+    if jsonl {
+        return write_jsonl(views);
+    }
+
+    let mut table = human_table();
+    table.set_header(vec!["name", "sql"]);
+    for view in views {
+        table.add_row(vec![
+            view.name.clone(),
+            truncate(&view.sql.replace(['\n', '\r', '\t'], " "), 100),
+        ]);
+    }
+    print_table(table)
+}
+
+fn output_migrations(migrations: &[MigrationInfo], json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(migrations);
+    }
+    if jsonl {
+        return write_jsonl(migrations);
+    }
+
+    let mut table = human_table();
+    table.set_header(vec!["name", "status", "applied_at", "file"]);
+    for migration in migrations {
+        table.add_row(vec![
+            migration.name.clone(),
+            if migration.applied {
+                "applied".to_string()
+            } else {
+                "pending".to_string()
+            },
+            migration.applied_at.clone().unwrap_or_default(),
+            migration.path.clone().unwrap_or_default(),
+        ]);
+    }
+    print_table(table)
+}
+
+fn output_migrate(result: &MigrateResult, json: bool, jsonl: bool) -> Result<(), String> {
+    if json {
+        return write_json(result);
+    }
+    if jsonl {
+        return write_jsonl(&result.applied);
+    }
+    if result.applied.is_empty() {
+        return print_line("no pending migrations");
+    }
+    for migration in &result.applied {
+        print_line(&format!(
+            "applied {} · session {} · backup {}",
+            migration.name,
+            migration.session_id,
+            migration.backup_path.as_deref().unwrap_or("-")
+        ))?;
+    }
+    print_line(&format!("{} migration(s) applied", result.applied.len()))
 }
 
 fn output_write(result: &WriteResult, json: bool, jsonl: bool) -> Result<(), String> {

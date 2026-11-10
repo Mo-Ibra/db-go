@@ -9,18 +9,24 @@ import type {
   FilterOp,
   FilterSpec,
   JsonObject,
+  MigrationInfo,
   Page,
   QueryResult,
   Row,
   RowUpdate,
+  SchemaChange,
   SchemaGraph,
   SchemaMap,
   SortSpec,
+  TableDetails,
   TableInfo,
 } from "./types";
 import { DataGrid } from "./components/DataGrid";
 import { RowDetail } from "./components/RowDetail";
 import { RowEditor } from "./components/RowEditor";
+import { StructureView } from "./components/StructureView";
+import { AlterTableDialog } from "./components/AlterTableDialog";
+import { MigrationsDialog } from "./components/MigrationsDialog";
 import { TableDesigner } from "./components/TableDesigner";
 import { cn } from "./lib/cn";
 
@@ -186,7 +192,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [showDesigner, setShowDesigner] = useState(false);
-  const [view, setView] = useState<"data" | "sql" | "diagram">("data");
+  const [view, setView] = useState<"data" | "structure" | "sql" | "diagram">("data");
   const [sqlText, setSqlText] = useState("");
   const [schema, setSchema] = useState<SchemaMap>({});
   const [schemaGraph, setSchemaGraph] = useState<SchemaGraph | null>(null);
@@ -218,7 +224,16 @@ export default function App() {
   const [pendingDeletes, setPendingDeletes] = useState<number[]>([]);
   const [rowEditor, setRowEditor] = useState<RowEditorState | null>(null);
   const [saving, setSaving] = useState(false);
+  const [tableDetails, setTableDetails] = useState<TableDetails | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [showAlterTable, setShowAlterTable] = useState(false);
+  const [showMigrations, setShowMigrations] = useState(false);
+  const [migrations, setMigrations] = useState<MigrationInfo[]>([]);
+  const [migrationsLoading, setMigrationsLoading] = useState(false);
+  const [migrationsApplying, setMigrationsApplying] = useState(false);
+  const [migrationsError, setMigrationsError] = useState<string | null>(null);
   const requestId = useRef(0);
+  const detailsRequestId = useRef(0);
   const bootstrapped = useRef(false);
   const lastDataVersion = useRef<number | null>(null);
   const externalChangePending = useRef(false);
@@ -362,6 +377,36 @@ export default function App() {
     [pageSize],
   );
 
+  const loadDetails = useCallback(async (table: string) => {
+    const id = ++detailsRequestId.current;
+    setDetailsLoading(true);
+    setError(null);
+    try {
+      const details = await api.tableDetails(table);
+      if (id !== detailsRequestId.current) return;
+      setTableDetails(details);
+    } catch (cause) {
+      if (id === detailsRequestId.current) {
+        setError(String(cause));
+        setTableDetails(null);
+      }
+    } finally {
+      if (id === detailsRequestId.current) setDetailsLoading(false);
+    }
+  }, []);
+
+  const loadMigrations = useCallback(async () => {
+    setMigrationsLoading(true);
+    setMigrationsError(null);
+    try {
+      setMigrations(await api.listMigrations());
+    } catch (cause) {
+      setMigrationsError(String(cause));
+    } finally {
+      setMigrationsLoading(false);
+    }
+  }, []);
+
   const applyDbInfo = useCallback((info: DbInfo) => {
     setDb(info);
     setTables(info.tables);
@@ -389,6 +434,15 @@ export default function App() {
     setRowEditor(null);
     setSaving(false);
     externalChangePending.current = false;
+    detailsRequestId.current += 1;
+    setTableDetails(null);
+    setDetailsLoading(false);
+    setShowAlterTable(false);
+    setShowMigrations(false);
+    setMigrations([]);
+    setMigrationsError(null);
+    setMigrationsApplying(false);
+    setMigrationsLoading(false);
     setNotice(null);
     setShowDesigner(false);
   }, []);
@@ -681,6 +735,10 @@ export default function App() {
         .catch((cause) => setError(String(cause)));
       return;
     }
+    if (view === "structure") {
+      if (selected) void loadDetails(selected);
+      return;
+    }
     if (view === "sql") {
       if (sqlText.trim()) void runQuery(sqlText);
       return;
@@ -705,10 +763,11 @@ export default function App() {
     history,
     historyIndex,
     guardPending,
+    loadDetails,
   ]);
 
   const switchView = useCallback(
-    (next: "data" | "sql" | "diagram") => {
+    (next: "data" | "structure" | "sql" | "diagram") => {
       if (next === "sql" && !sqlText.trim() && selected) {
         setSqlText(`SELECT * FROM ${quoteIdent(selected)} LIMIT 200;`);
       }
@@ -718,10 +777,13 @@ export default function App() {
           .then(setSchemaGraph)
           .catch((cause) => setError(String(cause)));
       }
+      if (next === "structure" && selected) {
+        void loadDetails(selected);
+      }
       setSelectedRow(null);
       setView(next);
     },
-    [sqlText, selected, schemaGraph],
+    [sqlText, selected, schemaGraph, loadDetails],
   );
 
   const changePageSize = useCallback(
@@ -748,6 +810,145 @@ export default function App() {
     if (guardPending()) return;
     setShowDesigner(true);
   }, [guardPending]);
+
+  const refreshAfterSchemaChange = useCallback(
+    async (table: string | null, message: string) => {
+      try {
+        const [nextTables, nextSchema, nextGraph] = await Promise.all([
+          api.listTables(),
+          api.schemaMap(),
+          api.schemaGraph(),
+        ]);
+        setTables(nextTables);
+        setSchema(nextSchema);
+        setSchemaGraph(nextGraph);
+        try {
+          lastDataVersion.current = await api.dataVersion();
+        } catch {
+          // Reloads below still refresh the visible state.
+        }
+        externalChangePending.current = false;
+        setNotice(message);
+
+        if (!table) return;
+        if (!nextTables.some((item) => item.name === table)) {
+          setSelected(null);
+          setPage(null);
+          setColumns([]);
+          setCount(null);
+          setTableDetails(null);
+          setView("data");
+          return;
+        }
+        if (view === "structure") {
+          await loadDetails(table);
+        } else if (view === "data" && selected === table) {
+          if (pagedMode) {
+            await loadOffsetPage(table, pageIndex, sort, dataFilter);
+          } else {
+            await loadTable(table, history[historyIndex]);
+          }
+        }
+      } catch (cause) {
+        setError(String(cause));
+      }
+    },
+    [
+      view,
+      selected,
+      pagedMode,
+      pageIndex,
+      sort,
+      dataFilter,
+      history,
+      historyIndex,
+      loadTable,
+      loadOffsetPage,
+      loadDetails,
+    ],
+  );
+
+  const requestAlterTable = useCallback(() => {
+    if (!selected) return;
+    if (guardPending()) return;
+    setShowAlterTable(true);
+  }, [selected, guardPending]);
+
+  const handleAlterApplied = useCallback(
+    async (change: SchemaChange) => {
+      const backup = change.backup_path ? ` · backup ${change.backup_path}` : "";
+      await refreshAfterSchemaChange(
+        selected,
+        `Applied schema change · migration ${change.migration_name}${backup}`,
+      );
+    },
+    [selected, refreshAfterSchemaChange],
+  );
+
+  const handleCreateIndex = useCallback(
+    async (name: string, columns: string[], unique: boolean) => {
+      if (!selected) throw new Error("No table selected.");
+      if (guardPending()) throw new Error("Save or discard pending changes first.");
+      const change = await api.createIndex(selected, name, columns, unique);
+      await refreshAfterSchemaChange(
+        selected,
+        `Created index ${name} · migration ${change.migration_name}`,
+      );
+    },
+    [selected, guardPending, refreshAfterSchemaChange],
+  );
+
+  const handleDropIndex = useCallback(
+    async (name: string) => {
+      if (!selected) throw new Error("No table selected.");
+      if (guardPending()) throw new Error("Save or discard pending changes first.");
+      const confirmed = await confirm(
+        `Drop index ${name}? A timestamped backup is kept before the change.`,
+        { title: "Drop index?", kind: "warning" },
+      );
+      if (!confirmed) return;
+      const change = await api.dropIndex(name);
+      await refreshAfterSchemaChange(
+        selected,
+        `Dropped index ${name} · migration ${change.migration_name}`,
+      );
+    },
+    [selected, guardPending, refreshAfterSchemaChange],
+  );
+
+  const openMigrations = useCallback(() => {
+    if (guardPending()) return;
+    setShowMigrations(true);
+    void loadMigrations();
+  }, [guardPending, loadMigrations]);
+
+  const handleApplyMigrations = useCallback(async () => {
+    if (guardPending()) return;
+    setMigrationsApplying(true);
+    setMigrationsError(null);
+    try {
+      const result = await api.applyMigrations();
+      await loadMigrations();
+      if (result.applied.length === 0) {
+        setNotice("No pending migrations.");
+        return;
+      }
+      const names = result.applied.map((migration) => migration.name).join(", ");
+      await refreshAfterSchemaChange(
+        selected,
+        `Applied ${result.applied.length} migration(s): ${names}`,
+      );
+    } catch (cause) {
+      setMigrationsError(String(cause));
+      try {
+        setMigrations(await api.listMigrations());
+      } catch {
+        // Keep the original error visible.
+      }
+    } finally {
+      setMigrationsApplying(false);
+    }
+  }, [guardPending, loadMigrations, refreshAfterSchemaChange, selected]);
 
   const saveChanges = useCallback(async () => {
     if (!selected || !hasPending || saving) return;
@@ -968,6 +1169,19 @@ export default function App() {
           setSchemaGraph(nextGraph);
 
           if (view === "diagram") return;
+          if (view === "structure") {
+            if (!selected) return;
+            if (!nextTables.some((table) => table.name === selected)) {
+              setSelected(null);
+              setPage(null);
+              setColumns([]);
+              setCount(null);
+              setTableDetails(null);
+              return;
+            }
+            await loadDetails(selected);
+            return;
+          }
           if (view === "sql") {
             setNotice(
               "Database changed by another process. Rerun the query to see fresh data.",
@@ -1013,6 +1227,7 @@ export default function App() {
     hasPending,
     loadTable,
     loadOffsetPage,
+    loadDetails,
   ]);
 
   const visibleTables = tables.filter((table) =>
@@ -1048,10 +1263,22 @@ export default function App() {
                   ? "Run the current query"
                   : view === "diagram"
                     ? "Refresh the schema graph"
-                    : "Refresh the current page"
+                    : view === "structure"
+                      ? "Refresh the table structure"
+                      : "Refresh the current page"
               }
             >
               {view === "sql" ? "Run query" : "Refresh"}
+            </button>
+          )}
+          {db && (
+            <button
+              className={BTN_GHOST}
+              onClick={openMigrations}
+              disabled={loading || queryRunning || saving}
+              title="List and apply migrations"
+            >
+              Migrations
             </button>
           )}
           <button className={BTN_GHOST} onClick={() => void createNewDatabase()}>
@@ -1270,6 +1497,17 @@ export default function App() {
                     </button>
                     <button
                       role="tab"
+                      aria-selected={view === "structure"}
+                      className={cn(
+                        "h-6 rounded-[5px] px-2.5 text-[11.5px] font-semibold",
+                        view === "structure" ? "bg-panel-3 text-fg" : "text-muted hover:text-fg",
+                      )}
+                      onClick={() => switchView("structure")}
+                    >
+                      Structure
+                    </button>
+                    <button
+                      role="tab"
                       aria-selected={view === "sql"}
                       className={cn(
                         "h-6 rounded-[5px] px-2.5 text-[11.5px] font-semibold",
@@ -1309,8 +1547,18 @@ export default function App() {
                       >
                         {selected}
                       </span>
-                      <span className={BADGE_SUBTLE}>{columns.length} columns</span>
-                      {count && !dataFilter && (
+                      <span className={BADGE_SUBTLE}>
+                        {view === "structure" && tableDetails?.name === selected
+                          ? tableDetails.columns.length
+                          : columns.length}{" "}
+                        columns
+                      </span>
+                      {view === "structure" && tableDetails?.name === selected && (
+                        <span className={BADGE_SUBTLE}>
+                          {tableDetails.indexes.length} indexes
+                        </span>
+                      )}
+                      {count && !dataFilter && view === "data" && (
                         <span className={BADGE_SUBTLE}>
                           {count.capped
                             ? `${count.count.toLocaleString()}+`
@@ -1368,6 +1616,8 @@ export default function App() {
                         </button>
                       </div>
                     </>
+                  ) : view === "structure" ? (
+                    <span className={BADGE_SUBTLE}>structure</span>
                   ) : view === "sql" ? (
                     <span className={BADGE_SUBTLE}>read-only</span>
                   ) : (
@@ -1545,6 +1795,22 @@ export default function App() {
                     </Suspense>
                   )}
                 </div>
+              ) : view === "structure" ? (
+                selected ? (
+                  <StructureView
+                    table={selected}
+                    details={tableDetails?.name === selected ? tableDetails : null}
+                    loading={detailsLoading}
+                    onRefresh={() => void loadDetails(selected)}
+                    onAlter={requestAlterTable}
+                    onCreateIndex={handleCreateIndex}
+                    onDropIndex={handleDropIndex}
+                  />
+                ) : (
+                  <div className="grid flex-1 place-items-center text-xs text-muted">
+                    Select a table to inspect its structure.
+                  </div>
+                )
               ) : (
                 <div className="flex min-h-0 flex-1">
                   <div className="flex min-w-0 flex-1 flex-col">
@@ -1625,23 +1891,27 @@ export default function App() {
                 ? `${schemaGraph?.tables.length ?? 0} tables · ${
                     schemaGraph?.relationships.length ?? 0
                   } relationships`
-                : view === "sql"
-                  ? queryResult
-                    ? `query · ${queryResult.rows.length.toLocaleString()} rows${
-                        queryResult.truncated ? " · truncated" : ""
-                      }`
-                    : "read-only SQL"
-                  : selected && page
-                    ? page.rows.length === 0
-                      ? "0 rows"
-                      : `rows ${rowStart.toLocaleString()}–${rowEnd.toLocaleString()} · ${
-                          pagedMode ? "filtered/sorted" : "keyset pagination"
+                : view === "structure"
+                  ? tableDetails?.name === selected
+                    ? `${tableDetails.columns.length} columns · ${tableDetails.indexes.length} indexes · ${tableDetails.foreign_keys.length} foreign keys`
+                    : "structure"
+                  : view === "sql"
+                    ? queryResult
+                      ? `query · ${queryResult.rows.length.toLocaleString()} rows${
+                          queryResult.truncated ? " · truncated" : ""
                         }`
-                    : selected
-                      ? pagedMode
-                        ? "filtered/sorted"
-                        : "keyset pagination"
-                      : "SQLite"}
+                      : "read-only SQL"
+                    : selected && page
+                      ? page.rows.length === 0
+                        ? "0 rows"
+                        : `rows ${rowStart.toLocaleString()}–${rowEnd.toLocaleString()} · ${
+                            pagedMode ? "filtered/sorted" : "keyset pagination"
+                          }`
+                      : selected
+                        ? pagedMode
+                          ? "filtered/sorted"
+                          : "keyset pagination"
+                        : "SQLite"}
             </span>
           </footer>
         </main>
@@ -1654,6 +1924,26 @@ export default function App() {
         initial={rowEditor?.row ?? null}
         onClose={() => setRowEditor(null)}
         onSubmit={submitRowEditor}
+      />
+
+      <AlterTableDialog
+        open={showAlterTable}
+        table={selected ?? ""}
+        columns={tableDetails?.name === selected ? tableDetails.columns : columns}
+        schema={schema}
+        onClose={() => setShowAlterTable(false)}
+        onApplied={handleAlterApplied}
+      />
+
+      <MigrationsDialog
+        open={showMigrations}
+        migrations={migrations}
+        loading={migrationsLoading}
+        applying={migrationsApplying}
+        error={migrationsError}
+        onClose={() => setShowMigrations(false)}
+        onRefresh={() => void loadMigrations()}
+        onApply={() => void handleApplyMigrations()}
       />
 
       <TableDesigner

@@ -18,8 +18,10 @@ What's here so far:
 - Create a database project: `db.sqlite`, `AGENTS.md`, `schema.md`, `migrations/`, `backups/`
 - Open an existing SQLite file with the native file picker
 - Visual table designer: types, PK/NN/unique, defaults, foreign keys, FK indexes
-- Live DDL preview; every schema change is recorded in hidden `_dbgo_migrations`
-- Every `create-table` also writes a migration file and refreshes `schema.md`
+- Structure inspector: DDL, columns, indexes, foreign keys, and index management
+- Alter tables from the GUI or CLI: add, rename, and drop columns with SQL preview
+- Indexes, views, and numbered migration files
+- Every schema change gets a backup, an audit row, and a migration record
 - List tables in the sidebar
 - Browse rows with a virtualized grid
 - Keyset pagination (`rowid`) — fast on large tables
@@ -88,6 +90,14 @@ dbgo query   ./samples/companies.db "select id, name, city from companies limit 
 cd database
 dbgo graph . --json
 dbgo create-table . --file table.json
+dbgo alter-table . companies --add-column '{"name":"country","type_name":"TEXT","primary_key":false,"not_null":false,"unique":false,"default_value":null,"references":null}'
+dbgo alter-table . companies --rename-column city=location
+dbgo alter-table . companies --drop-column legacy_id --yes
+dbgo index create . companies --name idx_companies_city --columns city
+dbgo index list . companies
+dbgo view create . active_companies --sql "select * from companies where active = 1"
+dbgo migrations .
+dbgo migrate .
 dbgo insert . companies --file rows.jsonl
 dbgo upsert . companies --key domain --file rows.jsonl
 dbgo update . companies --where '{"column":"id","op":"eq","value":1}' --set '{"city":"Berlin"}' --yes
@@ -135,6 +145,52 @@ dbgo backup .
 
 `query` is read-only. `page` uses keyset pagination on `rowid`. Run
 `dbgo <command> --help` for details.
+
+## Schema changes
+
+The **Structure** tab shows the table DDL, columns, indexes, foreign keys, and
+lets you create or drop indexes. **Alter table** stages add/rename/drop column
+operations with a live SQL preview, then applies them as one migration.
+
+```bash
+dbgo alter-table . companies --add-column '{"name":"country","type_name":"TEXT","primary_key":false,"not_null":false,"unique":false,"default_value":null,"references":null}'
+dbgo alter-table . companies --rename-column city=location
+dbgo alter-table . companies --drop-column legacy_id --yes
+dbgo alter-table . companies --file alter.json --sql-only
+```
+
+- Dropping a column requires `--yes`.
+- Added `NOT NULL` columns need a default.
+- Added columns cannot be primary keys or `UNIQUE`; create a unique index instead.
+- A column used by an index must have its index dropped first.
+- `--sql-only` validates and prints the SQL without touching the database.
+
+Indexes and views:
+
+```bash
+dbgo index create . companies --name idx_companies_city --columns city
+dbgo index create . companies --name idx_companies_domain --columns domain --unique
+dbgo index list . companies
+dbgo index drop . companies idx_companies_city --yes
+
+dbgo view create . active_companies --sql "select * from companies where active = 1"
+dbgo view list .
+dbgo view drop . active_companies --yes
+```
+
+### Migrations
+
+Every schema change writes a numbered file into `migrations/` and records it in
+the hidden `_dbgo_migrations` table. Apply files added by hand or by another
+tool with:
+
+```bash
+dbgo migrations .   # applied and pending files
+dbgo migrate .      # apply pending files in filename order
+```
+
+Each applied migration gets its own timestamped backup and audit session.
+Migrations should contain plain SQL statements, not `BEGIN`/`COMMIT`.
 
 ## Writing data
 
@@ -248,8 +304,12 @@ src/             React UI (Vite)
 
 ## Next
 
+- Backup history, restore, and undo by audit session
+- Large-database debugging: `EXPLAIN QUERY PLAN`, index usage, FK navigation, result export
+- Inline cell editing, multi-row selection, and copy/paste
 - Postgres and MySQL drivers
 - D1 export and deploy
+- Installers and release CI
 
 ## License
 

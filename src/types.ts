@@ -133,6 +133,64 @@ export type TableDesign = {
   index_foreign_keys: boolean;
 };
 
+export type AlterTableOp =
+  | { op: "add_column"; column: ColumnDesign }
+  | { op: "rename_column"; from: string; to: string }
+  | { op: "drop_column"; name: string };
+
+export type SchemaChange = {
+  session_id: string;
+  backup_path: string | null;
+  migration_id: number;
+  migration_name: string;
+  migration_path: string | null;
+  statements: string[];
+};
+
+export type IndexInfo = {
+  name: string;
+  table: string;
+  unique: boolean;
+  origin: string;
+  partial: boolean;
+  columns: string[];
+  sql: string | null;
+};
+
+export type ForeignKeyInfo = {
+  column: string;
+  referenced_table: string;
+  referenced_column: string;
+  on_update: string;
+  on_delete: string;
+};
+
+export type TableDetails = {
+  name: string;
+  kind: string;
+  ddl: string;
+  columns: ColumnInfo[];
+  indexes: IndexInfo[];
+  foreign_keys: ForeignKeyInfo[];
+};
+
+export type MigrationInfo = {
+  name: string;
+  applied: boolean;
+  applied_at: string | null;
+  path: string | null;
+};
+
+export type AppliedMigration = {
+  name: string;
+  session_id: string;
+  backup_path: string | null;
+};
+
+export type MigrateResult = {
+  applied: AppliedMigration[];
+};
+
 export type DbInfo = {
   path: string;
   tables: TableInfo[];

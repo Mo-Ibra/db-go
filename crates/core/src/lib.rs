@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use rusqlite::types::ValueRef;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -147,6 +147,80 @@ pub struct TableDesign {
     pub name: String,
     pub columns: Vec<ColumnDesign>,
     pub index_foreign_keys: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum AlterTableOp {
+    AddColumn { column: ColumnDesign },
+    RenameColumn { from: String, to: String },
+    DropColumn { name: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaChange {
+    pub session_id: String,
+    pub backup_path: Option<String>,
+    pub migration_id: i64,
+    pub migration_name: String,
+    pub migration_path: Option<String>,
+    pub statements: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexInfo {
+    pub name: String,
+    pub table: String,
+    pub unique: bool,
+    pub origin: String,
+    pub partial: bool,
+    pub columns: Vec<String>,
+    pub sql: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForeignKeyInfo {
+    pub column: String,
+    pub referenced_table: String,
+    pub referenced_column: String,
+    pub on_update: String,
+    pub on_delete: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TableDetails {
+    pub name: String,
+    pub kind: String,
+    pub ddl: String,
+    pub columns: Vec<ColumnInfo>,
+    pub indexes: Vec<IndexInfo>,
+    pub foreign_keys: Vec<ForeignKeyInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ViewInfo {
+    pub name: String,
+    pub sql: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MigrationInfo {
+    pub name: String,
+    pub applied: bool,
+    pub applied_at: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppliedMigration {
+    pub name: String,
+    pub session_id: String,
+    pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MigrateResult {
+    pub applied: Vec<AppliedMigration>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -304,7 +378,35 @@ impl Database {
             return Ok(());
         };
         let graph = self.schema_graph()?;
-        std::fs::write(project_dir.join("schema.md"), schema_markdown(&graph))?;
+        let mut markdown = schema_markdown(&graph);
+
+        let mut index_lines = String::new();
+        for table in &graph.tables {
+            for index in self.indexes(Some(&table.name))? {
+                if index.origin == "pk" {
+                    continue;
+                }
+                index_lines.push_str(&format!(
+                    "- `{}`: `{}`{} on {}\n",
+                    md_escape(&table.name),
+                    md_escape(&index.name),
+                    if index.unique { " (unique)" } else { "" },
+                    index
+                        .columns
+                        .iter()
+                        .map(|column| format!("`{}`", md_escape(column)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        if !index_lines.is_empty() {
+            markdown.push_str("## Indexes\n\n");
+            markdown.push_str(&index_lines);
+            markdown.push('\n');
+        }
+
+        std::fs::write(project_dir.join("schema.md"), markdown)?;
         Ok(())
     }
 
@@ -1256,31 +1358,763 @@ impl Database {
         }
         let migration_sql = format!("{};", statements.join(";\n"));
 
-        self.ensure_migrations_table()?;
-        let transaction = self.conn.unchecked_transaction()?;
-        transaction.execute_batch(&migration_sql)?;
-        transaction.execute(
-            "INSERT INTO _dbgo_migrations (name, sql) VALUES (?1, ?2)",
-            rusqlite::params![format!("create_table:{table_name}"), migration_sql],
+        self.run_schema_change(
+            &format!("create_table_{table_name}"),
+            statements,
+            "create_table",
+            table_name,
+            None,
+            Some(serde_json::json!({ "ddl": migration_sql })),
         )?;
-        let migration_id = transaction.last_insert_rowid();
-        transaction.commit()?;
-
-        if let Some(project_dir) = &self.project_dir {
-            if let Err(error) =
-                write_migration_file(project_dir, migration_id, table_name, &migration_sql)
-            {
-                eprintln!("[dbgo] warning: could not write migration file: {error}");
-            }
-            if let Err(error) = self.write_schema_md() {
-                eprintln!("[dbgo] warning: could not update schema.md: {error}");
-            }
-        }
 
         Ok(TableInfo {
             name: table_name.to_string(),
             kind: "table".to_string(),
         })
+    }
+
+    pub fn table_ddl(&self, table: &str) -> Result<String> {
+        self.ensure_table(table)?;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
+                [table],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .unwrap_or_default())
+    }
+
+    pub fn foreign_keys(&self, table: &str) -> Result<Vec<ForeignKeyInfo>> {
+        self.ensure_table(table)?;
+        let pragma = format!("PRAGMA foreign_key_list({})", quote_ident(table));
+        let mut statement = self.conn.prepare(&pragma)?;
+        let mut rows = statement.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let referenced_table: String = row.get(2)?;
+            let column: String = row.get(3)?;
+            let referenced_column: Option<String> = row.get(4)?;
+            let referenced_column = match referenced_column {
+                Some(column) if !column.is_empty() => column,
+                _ => self
+                    .primary_key_column(&referenced_table)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+            };
+            out.push(ForeignKeyInfo {
+                column,
+                referenced_table,
+                referenced_column,
+                on_update: row.get(5)?,
+                on_delete: row.get(6)?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn indexes(&self, table: Option<&str>) -> Result<Vec<IndexInfo>> {
+        if let Some(table) = table {
+            return self.indexes_for_table(table);
+        }
+
+        let mut statement = self.conn.prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND substr(name, 1, 6) <> '_dbgo_'
+             ORDER BY name",
+        )?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut out = Vec::new();
+        for name in names {
+            out.extend(self.indexes_for_table(&name)?);
+        }
+        Ok(out)
+    }
+
+    fn indexes_for_table(&self, table: &str) -> Result<Vec<IndexInfo>> {
+        self.ensure_table(table)?;
+        let pragma = format!("PRAGMA index_list({})", quote_ident(table));
+        let mut statement = self.conn.prepare(&pragma)?;
+        let mut rows = statement.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            let unique: bool = row.get::<_, i64>(2)? != 0;
+            let origin: String = row.get(3)?;
+            let partial: bool = row.get::<_, i64>(4)? != 0;
+            let sql: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1 COLLATE NOCASE",
+                    [&name],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+
+            let info_pragma = format!("PRAGMA index_info({})", quote_ident(&name));
+            let mut info_statement = self.conn.prepare(&info_pragma)?;
+            let columns = info_statement
+                .query_map([], |row| {
+                    Ok(row
+                        .get::<_, Option<String>>(2)?
+                        .unwrap_or_else(|| "(expression)".to_string()))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            out.push(IndexInfo {
+                name,
+                table: table.to_string(),
+                unique,
+                origin,
+                partial,
+                columns,
+                sql,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn table_details(&self, table: &str) -> Result<TableDetails> {
+        Ok(TableDetails {
+            name: table.to_string(),
+            kind: "table".to_string(),
+            ddl: self.table_ddl(table)?,
+            columns: self.columns(table)?,
+            indexes: self.indexes(Some(table))?,
+            foreign_keys: self.foreign_keys(table)?,
+        })
+    }
+
+    fn plan_alter_table(
+        &self,
+        table: &str,
+        operations: &[AlterTableOp],
+    ) -> Result<(Vec<String>, Vec<ColumnInfo>)> {
+        self.ensure_table(table)?;
+        if table.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(
+                "internal tables cannot be altered".to_string(),
+            ));
+        }
+        if operations.is_empty() {
+            return Err(DbError::InvalidDesign(
+                "no alter-table operations were provided".to_string(),
+            ));
+        }
+
+        let mut columns = self.columns(table)?;
+        let mut statements = Vec::new();
+
+        for operation in operations {
+            match operation {
+                AlterTableOp::AddColumn { column } => {
+                    validate_ident(&column.name)?;
+                    let type_name = normalize_type(&column.type_name)?;
+                    if columns
+                        .iter()
+                        .any(|existing| existing.name.eq_ignore_ascii_case(&column.name))
+                    {
+                        return Err(DbError::InvalidDesign(format!(
+                            "column already exists: {}",
+                            column.name
+                        )));
+                    }
+                    if column.primary_key {
+                        return Err(DbError::InvalidDesign(
+                            "cannot add a PRIMARY KEY column to an existing table".to_string(),
+                        ));
+                    }
+                    if column.unique {
+                        return Err(DbError::InvalidDesign(
+                            "cannot add a UNIQUE column; create a unique index instead".to_string(),
+                        ));
+                    }
+                    if column.not_null && column.default_value.is_none() {
+                        return Err(DbError::InvalidDesign(format!(
+                            "{} is NOT NULL, so it needs a default value",
+                            column.name
+                        )));
+                    }
+                    if let Some(references) = &column.references {
+                        if column.not_null {
+                            return Err(DbError::InvalidDesign(format!(
+                                "{} has a foreign key, so it cannot be NOT NULL when added",
+                                column.name
+                            )));
+                        }
+                        self.validate_alter_reference(table, column, references, &columns)?;
+                        let default_is_null = match column.default_value.as_deref() {
+                            None => true,
+                            Some(value) => value.trim().eq_ignore_ascii_case("NULL"),
+                        };
+                        if !default_is_null {
+                            return Err(DbError::InvalidDesign(format!(
+                                "{} has a foreign key, so its default must be NULL",
+                                column.name
+                            )));
+                        }
+                    }
+
+                    statements.push(format!(
+                        "ALTER TABLE {} ADD COLUMN {}",
+                        quote_ident(table),
+                        render_column_definition(column)?
+                    ));
+                    columns.push(ColumnInfo {
+                        name: column.name.clone(),
+                        type_name,
+                        not_null: column.not_null,
+                        primary_key: false,
+                    });
+                }
+                AlterTableOp::RenameColumn { from, to } => {
+                    validate_ident(from)?;
+                    validate_ident(to)?;
+                    if from.eq_ignore_ascii_case(to) {
+                        return Err(DbError::InvalidDesign(
+                            "rename source and target are the same".to_string(),
+                        ));
+                    }
+                    if !columns
+                        .iter()
+                        .any(|column| column.name.eq_ignore_ascii_case(from))
+                    {
+                        return Err(DbError::UnknownColumn(from.clone()));
+                    }
+                    if columns
+                        .iter()
+                        .any(|column| column.name.eq_ignore_ascii_case(to))
+                    {
+                        return Err(DbError::InvalidDesign(format!(
+                            "column already exists: {to}"
+                        )));
+                    }
+                    statements.push(format!(
+                        "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                        quote_ident(table),
+                        quote_ident(from),
+                        quote_ident(to)
+                    ));
+                    if let Some(column) = columns
+                        .iter_mut()
+                        .find(|column| column.name.eq_ignore_ascii_case(from))
+                    {
+                        column.name = to.clone();
+                    }
+                }
+                AlterTableOp::DropColumn { name } => {
+                    validate_ident(name)?;
+                    let Some(column) = columns
+                        .iter()
+                        .find(|column| column.name.eq_ignore_ascii_case(name))
+                    else {
+                        return Err(DbError::UnknownColumn(name.clone()));
+                    };
+                    if column.primary_key {
+                        return Err(DbError::InvalidDesign(
+                            "cannot drop a primary key column".to_string(),
+                        ));
+                    }
+                    if columns.len() <= 1 {
+                        return Err(DbError::InvalidDesign(
+                            "cannot drop the last column in a table".to_string(),
+                        ));
+                    }
+                    if let Some(index) = self.indexes_for_table(table)?.into_iter().find(|index| {
+                        index
+                            .columns
+                            .iter()
+                            .any(|column| column.eq_ignore_ascii_case(name))
+                    }) {
+                        return Err(DbError::InvalidDesign(format!(
+                            "column {name} is used by index {}; drop the index first",
+                            index.name
+                        )));
+                    }
+                    statements.push(format!(
+                        "ALTER TABLE {} DROP COLUMN {}",
+                        quote_ident(table),
+                        quote_ident(name)
+                    ));
+                    columns.retain(|column| !column.name.eq_ignore_ascii_case(name));
+                }
+            }
+        }
+
+        Ok((statements, columns))
+    }
+
+    pub fn preview_alter_table(
+        &self,
+        table: &str,
+        operations: &[AlterTableOp],
+    ) -> Result<Vec<String>> {
+        Ok(self.plan_alter_table(table, operations)?.0)
+    }
+
+    pub fn alter_table(&self, table: &str, operations: &[AlterTableOp]) -> Result<SchemaChange> {
+        let before_ddl = self.table_ddl(table)?;
+        let (statements, _) = self.plan_alter_table(table, operations)?;
+        self.run_schema_change(
+            &format!("alter_{table}"),
+            statements,
+            "alter_table",
+            table,
+            Some(serde_json::json!({ "ddl": before_ddl })),
+            Some(serde_json::json!({ "operations": operations })),
+        )
+    }
+
+    fn validate_alter_reference(
+        &self,
+        table: &str,
+        column: &ColumnDesign,
+        references: &ForeignKeyDesign,
+        columns: &[ColumnInfo],
+    ) -> Result<()> {
+        validate_ident(&references.table)?;
+        validate_ident(&references.column)?;
+        if references.table.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(
+                "cannot reference internal tables".to_string(),
+            ));
+        }
+
+        let target_columns = if references.table.eq_ignore_ascii_case(table) {
+            columns.to_vec()
+        } else {
+            if !self.table_exists(&references.table)? {
+                return Err(DbError::InvalidDesign(format!(
+                    "referenced table does not exist: {}",
+                    references.table
+                )));
+            }
+            self.columns(&references.table)?
+        };
+        if !target_columns
+            .iter()
+            .any(|target| target.name.eq_ignore_ascii_case(&references.column))
+        {
+            return Err(DbError::InvalidDesign(format!(
+                "{} references missing column {}.{}",
+                column.name, references.table, references.column
+            )));
+        }
+
+        let on_delete = normalize_on_delete(references.on_delete.as_deref())?;
+        if on_delete == "SET NULL" && column.not_null {
+            return Err(DbError::InvalidDesign(format!(
+                "{} is NOT NULL, so ON DELETE SET NULL is not allowed",
+                column.name
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn create_index(
+        &self,
+        table: &str,
+        name: &str,
+        columns: &[String],
+        unique: bool,
+    ) -> Result<SchemaChange> {
+        self.ensure_table(table)?;
+        if table.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(
+                "internal tables cannot be indexed".to_string(),
+            ));
+        }
+        validate_ident(name)?;
+        if name.to_ascii_lowercase().starts_with("_dbgo_")
+            || name.to_ascii_lowercase().starts_with("sqlite_")
+        {
+            return Err(DbError::InvalidDesign(format!(
+                "reserved index name: {name}"
+            )));
+        }
+        if columns.is_empty() {
+            return Err(DbError::InvalidDesign(
+                "an index needs at least one column".to_string(),
+            ));
+        }
+        let table_columns = self.columns(table)?;
+        for column in columns {
+            validate_ident(column)?;
+            if !table_columns
+                .iter()
+                .any(|existing| existing.name.eq_ignore_ascii_case(column))
+            {
+                return Err(DbError::UnknownColumn(column.clone()));
+            }
+        }
+        if self.any_object_exists(name)? {
+            return Err(DbError::InvalidDesign(format!(
+                "object already exists: {name}"
+            )));
+        }
+
+        let column_sql = columns
+            .iter()
+            .map(|column| quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "CREATE {}INDEX {} ON {} ({column_sql})",
+            if unique { "UNIQUE " } else { "" },
+            quote_ident(name),
+            quote_ident(table)
+        );
+        self.run_schema_change(
+            &format!("index_{name}"),
+            vec![sql.clone()],
+            "create_index",
+            table,
+            None,
+            Some(serde_json::json!({
+                "index": name,
+                "table": table,
+                "unique": unique,
+                "columns": columns,
+                "ddl": sql,
+            })),
+        )
+    }
+
+    pub fn drop_index(&self, name: &str) -> Result<SchemaChange> {
+        validate_ident(name)?;
+        if name.to_ascii_lowercase().starts_with("_dbgo_")
+            || name.to_ascii_lowercase().starts_with("sqlite_")
+        {
+            return Err(DbError::InvalidDesign(format!(
+                "reserved index name: {name}"
+            )));
+        }
+        let Some((table, Some(sql))) = self.object_record("index", name)? else {
+            return Err(DbError::InvalidDesign(format!(
+                "index not found or automatic: {name}"
+            )));
+        };
+        self.run_schema_change(
+            &format!("drop_index_{name}"),
+            vec![format!("DROP INDEX {}", quote_ident(name))],
+            "drop_index",
+            &table,
+            Some(serde_json::json!({ "index": name, "ddl": sql })),
+            None,
+        )
+    }
+
+    pub fn views(&self) -> Result<Vec<ViewInfo>> {
+        let mut statement = self.conn.prepare(
+            "SELECT name, sql FROM sqlite_master
+             WHERE type = 'view'
+               AND substr(name, 1, 6) <> '_dbgo_'
+             ORDER BY name",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(ViewInfo {
+                name: row.get(0)?,
+                sql: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn create_view(&self, name: &str, select_sql: &str) -> Result<SchemaChange> {
+        validate_ident(name)?;
+        if name.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(format!(
+                "reserved view name: {name}"
+            )));
+        }
+        if self.any_object_exists(name)? {
+            return Err(DbError::InvalidDesign(format!(
+                "object already exists: {name}"
+            )));
+        }
+        let select_sql = select_sql.trim().trim_end_matches(';');
+        if select_sql.is_empty() {
+            return Err(DbError::InvalidDesign(
+                "a view needs a SELECT statement".to_string(),
+            ));
+        }
+        {
+            let statement = self.conn.prepare(select_sql)?;
+            if !statement.readonly() {
+                return Err(DbError::ReadOnly);
+            }
+        }
+
+        let sql = format!("CREATE VIEW {} AS {}", quote_ident(name), select_sql);
+        self.run_schema_change(
+            &format!("view_{name}"),
+            vec![sql.clone()],
+            "create_view",
+            name,
+            None,
+            Some(serde_json::json!({ "view": name, "ddl": sql })),
+        )
+    }
+
+    pub fn drop_view(&self, name: &str) -> Result<SchemaChange> {
+        validate_ident(name)?;
+        if name.to_ascii_lowercase().starts_with("_dbgo_") {
+            return Err(DbError::InvalidDesign(format!(
+                "reserved view name: {name}"
+            )));
+        }
+        let Some((_, Some(sql))) = self.object_record("view", name)? else {
+            return Err(DbError::InvalidDesign(format!("view not found: {name}")));
+        };
+        self.run_schema_change(
+            &format!("drop_view_{name}"),
+            vec![format!("DROP VIEW {}", quote_ident(name))],
+            "drop_view",
+            name,
+            Some(serde_json::json!({ "view": name, "ddl": sql })),
+            None,
+        )
+    }
+
+    pub fn migrations(&self) -> Result<Vec<MigrationInfo>> {
+        self.ensure_migrations_table()?;
+        let applied = {
+            let mut statement = self
+                .conn
+                .prepare("SELECT name, sql, applied_at FROM _dbgo_migrations ORDER BY id")?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let mut used = vec![false; applied.len()];
+        let mut out = Vec::new();
+        if let Some(project_dir) = &self.project_dir {
+            let directory = project_dir.join("migrations");
+            if directory.is_dir() {
+                let mut files = std::fs::read_dir(&directory)?
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
+                    })
+                    .collect::<Vec<_>>();
+                files.sort();
+
+                for path in files {
+                    let name = path
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let content = std::fs::read_to_string(&path)?;
+                    let matched = applied.iter().position(|(applied_name, applied_sql, _)| {
+                        applied_name == &name || applied_sql.trim() == content.trim()
+                    });
+                    let (is_applied, applied_at) = match matched {
+                        Some(index) => {
+                            used[index] = true;
+                            (true, Some(applied[index].2.clone()))
+                        }
+                        None => (false, None),
+                    };
+                    out.push(MigrationInfo {
+                        name,
+                        applied: is_applied,
+                        applied_at,
+                        path: Some(path.display().to_string()),
+                    });
+                }
+            }
+        }
+
+        for (index, (name, _, applied_at)) in applied.into_iter().enumerate() {
+            if !used[index] {
+                out.push(MigrationInfo {
+                    name,
+                    applied: true,
+                    applied_at: Some(applied_at),
+                    path: None,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn apply_migrations(&self) -> Result<MigrateResult> {
+        let pending = self
+            .migrations()?
+            .into_iter()
+            .filter(|migration| !migration.applied)
+            .filter_map(|migration| migration.path.map(|path| (migration.name, path)))
+            .collect::<Vec<_>>();
+
+        let mut applied = Vec::new();
+        for (name, path) in pending {
+            let sql = std::fs::read_to_string(&path)?;
+            if sql.trim().is_empty() {
+                return Err(DbError::InvalidDesign(format!(
+                    "migration is empty: {path}"
+                )));
+            }
+            applied.push(self.apply_migration_sql(&name, &sql)?);
+        }
+        Ok(MigrateResult { applied })
+    }
+
+    fn apply_migration_sql(&self, name: &str, sql: &str) -> Result<AppliedMigration> {
+        let backup = self.backup()?;
+        self.ensure_migrations_table()?;
+        self.ensure_audit_table()?;
+        let session_id = new_session_id();
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute_batch(sql)?;
+        transaction.execute(
+            "INSERT INTO _dbgo_migrations (name, sql) VALUES (?1, ?2)",
+            rusqlite::params![name, sql],
+        )?;
+        record_audit(
+            &transaction,
+            &session_id,
+            "migrations",
+            None,
+            "migration",
+            None,
+            Some(&serde_json::json!({ "name": name })),
+        )?;
+        transaction.commit()?;
+
+        if let Err(error) = self.write_schema_md() {
+            eprintln!("[dbgo] warning: could not update schema.md: {error}");
+        }
+
+        Ok(AppliedMigration {
+            name: name.to_string(),
+            session_id,
+            backup_path: Some(backup.display().to_string()),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_schema_change(
+        &self,
+        slug: &str,
+        statements: Vec<String>,
+        action: &str,
+        object_name: &str,
+        before: Option<serde_json::Value>,
+        after: Option<serde_json::Value>,
+    ) -> Result<SchemaChange> {
+        if statements.is_empty() {
+            return Err(DbError::InvalidDesign(
+                "no schema statements to apply".to_string(),
+            ));
+        }
+
+        let backup = self.backup()?;
+        self.ensure_migrations_table()?;
+        self.ensure_audit_table()?;
+        let session_id = new_session_id();
+        let sql = format!(
+            "{};",
+            statements
+                .iter()
+                .map(|statement| statement.trim().trim_end_matches(';'))
+                .collect::<Vec<_>>()
+                .join(";\n")
+        );
+
+        let transaction = self.conn.unchecked_transaction()?;
+        let migration_id: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM _dbgo_migrations",
+            [],
+            |row| row.get(0),
+        )?;
+        let migration_name = format!("{migration_id:04}_{}", sanitize_slug(slug));
+        transaction.execute_batch(&sql)?;
+        transaction.execute(
+            "INSERT INTO _dbgo_migrations (id, name, sql) VALUES (?1, ?2, ?3)",
+            rusqlite::params![migration_id, migration_name, sql],
+        )?;
+        record_audit(
+            &transaction,
+            &session_id,
+            object_name,
+            None,
+            action,
+            before.as_ref(),
+            after.as_ref(),
+        )?;
+        transaction.commit()?;
+
+        let migration_path = if let Some(project_dir) = &self.project_dir {
+            match write_migration_named(project_dir, &migration_name, action, object_name, &sql) {
+                Ok(path) => Some(path.display().to_string()),
+                Err(error) => {
+                    eprintln!("[dbgo] warning: could not write migration file: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Err(error) = self.write_schema_md() {
+            eprintln!("[dbgo] warning: could not update schema.md: {error}");
+        }
+
+        Ok(SchemaChange {
+            session_id,
+            backup_path: Some(backup.display().to_string()),
+            migration_id,
+            migration_name,
+            migration_path,
+            statements,
+        })
+    }
+
+    fn object_record(&self, kind: &str, name: &str) -> Result<Option<(String, Option<String>)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT tbl_name, sql FROM sqlite_master
+                 WHERE type = ?1 AND name = ?2 COLLATE NOCASE",
+                [kind, name],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?)
+    }
+
+    fn any_object_exists(&self, name: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE name = ?1 COLLATE NOCASE
+                  AND type IN ('table', 'view', 'index', 'trigger')
+             )",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )? != 0)
     }
 
     fn validate_foreign_key(
@@ -1466,36 +2300,40 @@ fn render_default(value: &str) -> Result<String> {
     }
 }
 
+fn render_column_definition(column: &ColumnDesign) -> Result<String> {
+    let type_name = normalize_type(&column.type_name)?;
+    let mut parts = vec![quote_ident(&column.name), type_name];
+    if column.primary_key {
+        parts.push("PRIMARY KEY".to_string());
+    }
+    if column.not_null || column.primary_key {
+        parts.push("NOT NULL".to_string());
+    }
+    if column.unique && !column.primary_key {
+        parts.push("UNIQUE".to_string());
+    }
+    if let Some(default_value) = &column.default_value {
+        parts.push(format!("DEFAULT {}", render_default(default_value)?));
+    }
+    if let Some(references) = &column.references {
+        let mut reference_sql = format!(
+            "REFERENCES {}({})",
+            quote_ident(&references.table),
+            quote_ident(&references.column)
+        );
+        let on_delete = normalize_on_delete(references.on_delete.as_deref())?;
+        if on_delete != "NO ACTION" {
+            reference_sql.push_str(&format!(" ON DELETE {on_delete}"));
+        }
+        parts.push(reference_sql);
+    }
+    Ok(parts.join(" "))
+}
+
 fn render_create_table(design: &TableDesign) -> Result<String> {
     let mut definitions = Vec::with_capacity(design.columns.len());
     for column in &design.columns {
-        let type_name = normalize_type(&column.type_name)?;
-        let mut parts = vec![quote_ident(&column.name), type_name];
-        if column.primary_key {
-            parts.push("PRIMARY KEY".to_string());
-        }
-        if column.not_null || column.primary_key {
-            parts.push("NOT NULL".to_string());
-        }
-        if column.unique && !column.primary_key {
-            parts.push("UNIQUE".to_string());
-        }
-        if let Some(default_value) = &column.default_value {
-            parts.push(format!("DEFAULT {}", render_default(default_value)?));
-        }
-        if let Some(references) = &column.references {
-            let mut reference_sql = format!(
-                "REFERENCES {}({})",
-                quote_ident(&references.table),
-                quote_ident(&references.column)
-            );
-            let on_delete = normalize_on_delete(references.on_delete.as_deref())?;
-            if on_delete != "NO ACTION" {
-                reference_sql.push_str(&format!(" ON DELETE {on_delete}"));
-            }
-            parts.push(reference_sql);
-        }
-        definitions.push(format!("  {}", parts.join(" ")));
+        definitions.push(format!("  {}", render_column_definition(column)?));
     }
     Ok(format!(
         "CREATE TABLE {} (\n{}\n)",
@@ -1667,6 +2505,71 @@ Then run:
 dbgo create-table . --file table.json
 ```
 
+## Alter tables
+
+An operations file keeps multiple changes atomic:
+
+```json
+{
+  "operations": [
+    {
+      "op": "add_column",
+      "column": {
+        "name": "country",
+        "type_name": "TEXT",
+        "primary_key": false,
+        "not_null": true,
+        "unique": false,
+        "default_value": "US",
+        "references": null
+      }
+    },
+    { "op": "rename_column", "from": "city", "to": "location" },
+    { "op": "drop_column", "name": "legacy_id" }
+  ]
+}
+```
+
+```bash
+dbgo alter-table . companies --file alter.json
+dbgo alter-table . companies --add-column '{"name":"note","type_name":"TEXT","primary_key":false,"not_null":false,"unique":false,"default_value":null,"references":null}'
+dbgo alter-table . companies --rename-column city=location
+dbgo alter-table . companies --drop-column legacy_id --yes
+dbgo alter-table . companies --file alter.json --sql-only
+```
+
+- `--sql-only` validates and prints SQL without writing.
+- Dropping a column requires `--yes`.
+- Adding a NOT NULL column requires a default.
+- Adding a primary-key or UNIQUE column is rejected; create a unique index instead.
+- A dropped column cannot be used by an index; drop the index first.
+
+## Indexes and views
+
+```bash
+dbgo index create . companies --name idx_companies_city --columns city
+dbgo index create . companies --name idx_companies_domain --columns domain --unique
+dbgo index list . companies
+dbgo index drop . companies idx_companies_city --yes
+
+dbgo view create . active_companies --sql "select * from companies where active = 1"
+dbgo view list .
+dbgo view drop . active_companies --yes
+```
+
+## Migrations
+
+Schema commands write numbered `.sql` files into `migrations/` and record them in
+`_dbgo_migrations`. Apply any files added by hand or by another tool:
+
+```bash
+dbgo migrations .
+dbgo migrate .
+```
+
+Migrations run in filename order. Each applied file gets its own backup and
+audit session. Do not edit a migration that is already recorded as applied.
+
 ## Backups and audit
 
 - Every write creates a timestamped snapshot in `backups/`.
@@ -1680,9 +2583,11 @@ dbgo create-table . --file table.json
 - Use `--json` or `--jsonl` for machine-readable output.
 - Run commands from this folder and use `.` as the database path.
 - Use `--yes` for update/delete.
+- Use `--yes` when dropping columns, indexes, or views.
 - Prefer `upsert` with a natural key over blind inserts.
 - Do not update primary key columns.
-- Do not edit `migrations/` by hand unless applying them to D1.
+- Do not edit a migration that is already applied; add a new numbered file instead.
+- Check `dbgo migrations .` before and after changing the schema manually.
 "#;
 
     TEMPLATE
@@ -1690,17 +2595,35 @@ dbgo create-table . --file table.json
         .replace("{{DATABASE}}", &config.database)
 }
 
-fn write_migration_file(
+fn sanitize_slug(value: &str) -> String {
+    let mut slug = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while slug.contains("__") {
+        slug = slug.replace("__", "_");
+    }
+    slug.trim_matches('_').to_string()
+}
+
+fn write_migration_named(
     project_dir: &Path,
-    migration_id: i64,
-    table: &str,
+    name: &str,
+    action: &str,
+    object_name: &str,
     sql: &str,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let migrations = project_dir.join("migrations");
     std::fs::create_dir_all(&migrations)?;
-    let path = migrations.join(format!("{:04}_create_{}.sql", migration_id, table));
-    std::fs::write(path, format!("{sql}\n"))?;
-    Ok(())
+    let path = migrations.join(format!("{name}.sql"));
+    std::fs::write(&path, format!("-- {action} {object_name}\n{sql}\n"))?;
+    Ok(path)
 }
 
 fn schema_markdown(graph: &SchemaGraph) -> String {
@@ -2440,8 +3363,12 @@ mod tests {
         assert_eq!(city_of(&db, "acme.test"), "Berlin");
 
         let sessions = db.sessions().unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].actions, 1);
+        assert_eq!(sessions.len(), 2);
+        let inserted = sessions
+            .iter()
+            .find(|session| session.session_id == result.session_id)
+            .expect("insert session is listed");
+        assert_eq!(inserted.actions, 1);
     }
 
     #[test]
@@ -2607,7 +3534,7 @@ mod tests {
         assert_eq!(city_of(&db, "initech.test"), "Tokyo");
 
         let sessions = db.sessions().unwrap();
-        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions.len(), 3);
         let saved = sessions
             .iter()
             .find(|session| session.session_id == result.session_id)
@@ -2711,6 +3638,236 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(city_of(&db, "acme.test"), "Berlin");
+    }
+
+    #[test]
+    fn alters_table_add_rename_and_drop_columns() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+                ("city", serde_json::json!("Berlin")),
+            ])],
+        )
+        .unwrap();
+
+        let operations = vec![
+            AlterTableOp::AddColumn {
+                column: ColumnDesign {
+                    name: "country".into(),
+                    type_name: "TEXT".into(),
+                    primary_key: false,
+                    not_null: true,
+                    unique: false,
+                    default_value: Some("US".into()),
+                    references: None,
+                },
+            },
+            AlterTableOp::RenameColumn {
+                from: "city".into(),
+                to: "location".into(),
+            },
+            AlterTableOp::DropColumn {
+                name: "country".into(),
+            },
+        ];
+
+        let preview = db.preview_alter_table("companies", &operations).unwrap();
+        assert_eq!(preview.len(), 3);
+        assert!(db
+            .columns("companies")
+            .unwrap()
+            .iter()
+            .any(|c| c.name == "city"));
+
+        let change = db.alter_table("companies", &operations).unwrap();
+        assert_eq!(change.statements.len(), 3);
+        assert!(change.backup_path.is_some());
+
+        let columns = db.columns("companies").unwrap();
+        let names = columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, vec!["id", "domain", "location"]);
+        let result = db
+            .query(
+                "SELECT location FROM companies WHERE domain = 'acme.test'",
+                10,
+            )
+            .unwrap();
+        assert!(matches!(
+            result.rows[0].cells[0],
+            CellValue::Text { ref value } if value == "Berlin"
+        ));
+    }
+
+    #[test]
+    fn rejects_unsafe_alter_operations() {
+        let (_dir, db) = temp_companies_db();
+        let not_null = db.preview_alter_table(
+            "companies",
+            &[AlterTableOp::AddColumn {
+                column: ColumnDesign {
+                    name: "country".into(),
+                    type_name: "TEXT".into(),
+                    primary_key: false,
+                    not_null: true,
+                    unique: false,
+                    default_value: None,
+                    references: None,
+                },
+            }],
+        );
+        assert!(matches!(not_null, Err(DbError::InvalidDesign(_))));
+
+        let drop_indexed = db.preview_alter_table(
+            "companies",
+            &[AlterTableOp::DropColumn {
+                name: "domain".into(),
+            }],
+        );
+        assert!(matches!(drop_indexed, Err(DbError::InvalidDesign(_))));
+    }
+
+    #[test]
+    fn creates_and_drops_indexes() {
+        let (_dir, db) = temp_companies_db();
+        let change = db
+            .create_index(
+                "companies",
+                "idx_companies_city",
+                &["city".to_string()],
+                false,
+            )
+            .unwrap();
+        assert!(change.migration_name.contains("idx_companies_city"));
+        let indexes = db.indexes(Some("companies")).unwrap();
+        let created = indexes
+            .iter()
+            .find(|index| index.name == "idx_companies_city")
+            .expect("index is listed");
+        assert_eq!(created.columns, vec!["city"]);
+
+        let duplicate = db.create_index(
+            "companies",
+            "idx_companies_city",
+            &["city".to_string()],
+            false,
+        );
+        assert!(duplicate.is_err());
+
+        db.drop_index("idx_companies_city").unwrap();
+        assert!(!db
+            .indexes(Some("companies"))
+            .unwrap()
+            .iter()
+            .any(|index| index.name == "idx_companies_city"));
+    }
+
+    #[test]
+    fn creates_and_drops_views() {
+        let (_dir, db) = temp_companies_db();
+        db.insert_rows(
+            "companies",
+            &[json_row(&[
+                ("id", serde_json::json!(1)),
+                ("domain", serde_json::json!("acme.test")),
+                ("city", serde_json::json!("Berlin")),
+            ])],
+        )
+        .unwrap();
+
+        db.create_view(
+            "berlin_companies",
+            "SELECT * FROM companies WHERE city = 'Berlin'",
+        )
+        .unwrap();
+        assert_eq!(db.views().unwrap().len(), 1);
+        let result = db.query("SELECT domain FROM berlin_companies", 10).unwrap();
+        assert_eq!(result.rows.len(), 1);
+
+        db.drop_view("berlin_companies").unwrap();
+        assert!(db.views().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lists_and_applies_pending_migrations() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("database");
+        let (db, _) = Database::create_project(&project, false).unwrap();
+        db.create_table(&TableDesign {
+            name: "notes".into(),
+            columns: vec![
+                ColumnDesign {
+                    primary_key: true,
+                    not_null: true,
+                    ..column("id", "INTEGER")
+                },
+                ColumnDesign {
+                    not_null: true,
+                    ..column("body", "TEXT")
+                },
+            ],
+            index_foreign_keys: true,
+        })
+        .unwrap();
+
+        let migrations = db.migrations().unwrap();
+        assert!(migrations.iter().any(|m| m.applied));
+
+        std::fs::write(
+            project.join("migrations").join("0002_manual.sql"),
+            "CREATE TABLE tags (id INTEGER PRIMARY KEY, label TEXT NOT NULL);\n",
+        )
+        .unwrap();
+
+        let migrations = db.migrations().unwrap();
+        let pending = migrations
+            .iter()
+            .find(|migration| migration.name == "0002_manual")
+            .expect("manual migration is listed");
+        assert!(!pending.applied);
+
+        let result = db.apply_migrations().unwrap();
+        assert_eq!(result.applied.len(), 1);
+        assert_eq!(result.applied[0].name, "0002_manual");
+        assert!(db.table_exists("tags").unwrap());
+
+        let migrations = db.migrations().unwrap();
+        assert!(
+            migrations
+                .iter()
+                .find(|migration| migration.name == "0002_manual")
+                .unwrap()
+                .applied
+        );
+        assert!(db.apply_migrations().unwrap().applied.is_empty());
+    }
+
+    #[test]
+    fn recognizes_old_create_table_migrations_by_sql() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("legacy");
+        let (db, _) = Database::create_project(&project, false).unwrap();
+        let sql = "CREATE TABLE \"legacy\" (\"id\" INTEGER PRIMARY KEY);";
+        db.conn
+            .execute(
+                "INSERT INTO _dbgo_migrations (name, sql) VALUES (?1, ?2)",
+                rusqlite::params!["create_table:legacy", sql],
+            )
+            .unwrap();
+        std::fs::write(
+            project.join("migrations").join("0001_create_legacy.sql"),
+            format!("{sql}\n"),
+        )
+        .unwrap();
+
+        let migrations = db.migrations().unwrap();
+        let file = migrations
+            .iter()
+            .find(|migration| migration.name == "0001_create_legacy")
+            .expect("legacy file is listed");
+        assert!(file.applied);
     }
 
     #[test]

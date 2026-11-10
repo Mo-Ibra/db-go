@@ -1,17 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AlterTableOp,
   ColumnInfo,
   CountResult,
   DbInfo,
   FilterSpec,
   JsonObject,
+  MigrationInfo,
+  MigrateResult,
   Page,
   QueryResult,
   RowUpdate,
+  SchemaChange,
   SchemaGraph,
   SchemaMap,
   SortSpec,
   TableDesign,
+  TableDetails,
   TableInfo,
   WriteResult,
 } from "../types";
@@ -24,6 +29,16 @@ export const api = {
   createProject: (path: string, overwrite: boolean) =>
     invoke<DbInfo>("create_project", { path, overwrite }),
   createTable: (design: TableDesign) => invoke<TableInfo>("create_table", { design }),
+  tableDetails: (table: string) => invoke<TableDetails>("table_details", { table }),
+  previewAlterTable: (table: string, operations: AlterTableOp[]) =>
+    invoke<string[]>("preview_alter_table", { table, operations }),
+  alterTable: (table: string, operations: AlterTableOp[]) =>
+    invoke<SchemaChange>("alter_table", { table, operations }),
+  createIndex: (table: string, name: string, columns: string[], unique: boolean) =>
+    invoke<SchemaChange>("create_index", { table, name, columns, unique }),
+  dropIndex: (name: string) => invoke<SchemaChange>("drop_index", { name }),
+  listMigrations: () => invoke<MigrationInfo[]>("list_migrations"),
+  applyMigrations: () => invoke<MigrateResult>("apply_migrations"),
   saveChanges: (
     table: string,
     updates: RowUpdate[],

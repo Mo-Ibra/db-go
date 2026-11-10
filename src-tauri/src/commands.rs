@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use db_go_core::{
-    ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec, JsonObject, Page,
-    QueryResult, RowUpdate, SchemaGraph, SortSpec, TableDesign, TableInfo, WriteResult,
+    AlterTableOp, ColumnInfo, CountResult, Database, DbInfo, Direction, FilterSpec, JsonObject,
+    MigrateResult, MigrationInfo, Page, QueryResult, RowUpdate, SchemaChange, SchemaGraph,
+    SortSpec, TableDesign, TableDetails, TableInfo, WriteResult,
 };
 use tauri::State;
 
@@ -213,6 +214,144 @@ pub async fn load_table_page(
         database
             .table_page(&table, filter.as_ref(), sort.as_ref(), offset, limit)
             .map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn table_details(
+    table: String,
+    state: State<'_, AppState>,
+) -> Result<TableDetails, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<TableDetails, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        database.table_details(&table).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn preview_alter_table(
+    table: String,
+    operations: Vec<AlterTableOp>,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        database
+            .preview_alter_table(&table, &operations)
+            .map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn alter_table(
+    table: String,
+    operations: Vec<AlterTableOp>,
+    state: State<'_, AppState>,
+) -> Result<SchemaChange, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<SchemaChange, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let change = database
+            .alter_table(&table, &operations)
+            .map_err(to_error)?;
+        eprintln!(
+            "[dbgo] altered table {table} migration={} session={}",
+            change.migration_name, change.session_id
+        );
+        Ok(change)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn create_index(
+    table: String,
+    name: String,
+    columns: Vec<String>,
+    unique: bool,
+    state: State<'_, AppState>,
+) -> Result<SchemaChange, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<SchemaChange, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let change = database
+            .create_index(&table, &name, &columns, unique)
+            .map_err(to_error)?;
+        eprintln!(
+            "[dbgo] created index {name} on {table} migration={}",
+            change.migration_name
+        );
+        Ok(change)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn drop_index(name: String, state: State<'_, AppState>) -> Result<SchemaChange, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<SchemaChange, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let change = database.drop_index(&name).map_err(to_error)?;
+        eprintln!(
+            "[dbgo] dropped index {name} migration={}",
+            change.migration_name
+        );
+        Ok(change)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn list_migrations(state: State<'_, AppState>) -> Result<Vec<MigrationInfo>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<MigrationInfo>, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        database.migrations().map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+pub async fn apply_migrations(state: State<'_, AppState>) -> Result<MigrateResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<MigrateResult, String> {
+        let guard = db.lock().map_err(|_| lock_error())?;
+        let database = guard
+            .as_ref()
+            .ok_or_else(|| "no database open".to_string())?;
+        let result = database.apply_migrations().map_err(to_error)?;
+        eprintln!("[dbgo] applied {} migration(s)", result.applied.len());
+        Ok(result)
     })
     .await
     .map_err(to_error)?
