@@ -8,7 +8,7 @@ type PendingEditsOptions = {
   page: Page | null;
   columns: ColumnInfo[];
   selected: string | null;
-  view: "data" | "structure" | "sql" | "diagram";
+  view: "data" | "structure" | "sql" | "diagram" | "cards";
   restoringBackup: string | null;
   setNotice: (notice: string | null) => void;
   setError: (error: string | null) => void;

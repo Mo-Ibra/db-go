@@ -1,10 +1,11 @@
-import { Database, ListTree, Network, TerminalSquare } from "lucide-react";
+import { Database, LayoutGrid, ListTree, Network, TerminalSquare } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useWorkspace } from "@/app/providers/WorkspaceContext";
 
-const screens: { id: "data" | "structure" | "diagram" | "sql"; label: string; icon: LucideIcon }[] = [
+const screens: { id: "data" | "cards" | "structure" | "diagram" | "sql"; label: string; icon: LucideIcon }[] = [
   { id: "data", label: "Data", icon: Database },
+  { id: "cards", label: "Cards", icon: LayoutGrid },
   { id: "structure", label: "Structure", icon: ListTree },
   { id: "diagram", label: "Diagram", icon: Network },
   { id: "sql", label: "SQL", icon: TerminalSquare },

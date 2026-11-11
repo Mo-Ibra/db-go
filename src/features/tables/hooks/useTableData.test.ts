@@ -34,6 +34,7 @@ describe("useTableData", () => {
   it("loads a table and its columns", async () => {
     const { result } = renderHook(() =>
       useTableData({
+        currentView: "data",
         guardPending: () => false,
         resetTableUi: () => {},
         resetTableDetails: () => {},
@@ -56,6 +57,7 @@ describe("useTableData", () => {
   it("refuses to switch tables while pending edits are guarded", async () => {
     const { result } = renderHook(() =>
       useTableData({
+        currentView: "data",
         guardPending: () => true,
         resetTableUi: () => {},
         resetTableDetails: () => {},

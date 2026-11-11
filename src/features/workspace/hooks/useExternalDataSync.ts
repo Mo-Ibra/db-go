@@ -11,7 +11,7 @@ import type {
   TableStats,
 } from "@/types";
 
-type View = "data" | "structure" | "sql" | "diagram";
+type View = "data" | "structure" | "sql" | "diagram" | "cards";
 
 type ExternalDataSyncOptions = {
   dbPath: string | null;
@@ -146,6 +146,10 @@ export function useExternalDataSync(options: ExternalDataSyncOptions) {
             setNotice(
               "Database changed by another process. Rerun the query to see fresh data.",
             );
+            return;
+          }
+          if (view === "cards") {
+            setNotice("Database changed by another process. Refresh the cards to reload.");
             return;
           }
           if (!selected) return;

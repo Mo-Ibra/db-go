@@ -4,6 +4,7 @@ import { StatusBanners } from "@/components/feedback/StatusBanners";
 import { StatusFooter } from "@/components/layout/StatusFooter";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { CardsScreen } from "@/screens/database/cards/CardsScreen";
 import { DataScreen } from "@/screens/database/data/DataScreen";
 import { DiagramScreen } from "@/screens/database/diagram/DiagramScreen";
 import { SqlScreen } from "@/screens/database/sql/SqlScreen";
@@ -20,6 +21,8 @@ export function DatabaseScreen() {
         <SqlScreen />
       ) : view === "diagram" ? (
         <DiagramScreen />
+      ) : view === "cards" ? (
+        <CardsScreen />
       ) : !selected ? (
         tables.length === 0 ? (
           <EmptyState

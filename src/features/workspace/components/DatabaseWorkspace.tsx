@@ -11,7 +11,10 @@ type DatabaseSession = ReturnType<typeof useDatabaseSession>;
 
 export function DatabaseWorkspace({ session }: { session: DatabaseSession }) {
   const workspace = useWorkspaceController(session);
-  const showSidebar = workspace.view === "data" || workspace.view === "structure";
+  const showSidebar =
+    workspace.view === "data" ||
+    workspace.view === "structure" ||
+    workspace.view === "cards";
 
   return (
     <WorkspaceProvider value={workspace}>

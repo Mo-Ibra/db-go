@@ -18,7 +18,7 @@ import type {
   TableStats,
 } from "@/types";
 
-type View = "data" | "structure" | "sql" | "diagram";
+type View = "data" | "structure" | "sql" | "diagram" | "cards";
 
 type SchemaActionsOptions = {
   setShowDesigner: (show: boolean) => void;

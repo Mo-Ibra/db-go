@@ -3,7 +3,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "@/lib/api";
 import type { ExportFormat, FilterSpec, SortSpec } from "@/types";
 
-type View = "data" | "structure" | "sql" | "diagram";
+type View = "data" | "structure" | "sql" | "diagram" | "cards";
 
 type ExportOptions = {
   exporting: boolean;

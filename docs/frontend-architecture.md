@@ -32,6 +32,7 @@ and dialogs do not need a large manual reset routine.
 - **Data** — table sidebar, toolbar, filter bar, grid, row detail, pending changes.
 - **Structure** — table sidebar, columns, indexes, foreign keys, DDL.
 - **Diagram** — full-width schema diagram.
+- **Cards** — schema-driven card explorer with five layouts, pagination, search, sort, and a read-only detail drawer.
 - **SQL** — editor, query history, query plan, results, export.
 
 Import, backups, migrations, D1 export, table design, and row editing remain
@@ -51,6 +52,7 @@ src/
 │       ├── data/
 │       ├── structure/
 │       ├── diagram/
+│       ├── cards/
 │       ├── sql/
 │       └── results/
 ├── components/
@@ -63,6 +65,7 @@ src/
 │   ├── schema/
 │   ├── query/
 │   ├── diagram/
+│   ├── cards/
 │   ├── project/
 │   └── workspace/
 └── lib/
@@ -84,6 +87,8 @@ folder contains only reusable primitives.
 | SQL text, result, plan, history | `useQueryEditor` |
 | Structure details and stats | `useTableDetails` |
 | Migrations, backups, import, D1 dialogs | `useProjectDialogs` |
+| Card templates and localStorage persistence | `useCardTemplates` |
+| Card page loading, search, sort | `useCardPage` |
 | Schema/index/navigation actions | `useSchemaActions` |
 | External database change polling | `useExternalDataSync` |
 | Ctrl/Cmd+O shortcut | `useOpenDatabaseShortcut` |

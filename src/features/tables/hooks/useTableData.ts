@@ -17,9 +17,10 @@ import type {
   SortSpec,
 } from "@/types";
 
-type View = "data" | "structure" | "sql" | "diagram";
+type View = "data" | "structure" | "sql" | "diagram" | "cards";
 
 type TableDataOptions = {
+  currentView: View;
   guardPending: () => boolean;
   resetTableUi: () => void;
   resetTableDetails: () => void;
@@ -40,6 +41,7 @@ function syncFilterColumn(
 }
 
 export function useTableData({
+  currentView,
   guardPending,
   resetTableUi,
   resetTableDetails,
@@ -175,7 +177,7 @@ export function useTableData({
     (table: string) => {
       if (table === selected) return;
       if (guardPending()) return;
-      setView("data");
+
       setSort(null);
       setDataFilter(null);
       setPageIndex(0);
@@ -188,14 +190,23 @@ export function useTableData({
       setCount(null);
       setHistory([null]);
       setHistoryIndex(0);
+
+      if (currentView === "cards") {
+        setSelected(table);
+        return;
+      }
+
+      setView("data");
       void loadTable(table, null);
     },
     [
+      currentView,
       guardPending,
       loadTable,
       resetTableDetails,
       resetTableUi,
       selected,
+      setSelected,
       setView,
     ],
   );

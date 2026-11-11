@@ -39,7 +39,7 @@ export function useWorkspaceController(session: DatabaseSession) {
   const [tables, setTables] = useState<TableInfo[]>(db?.tables ?? []);
   const [filterText, setFilterText] = useState("");
   const [showDesigner, setShowDesigner] = useState(showDesignerOnOpen);
-  const [view, setView] = useState<"data" | "structure" | "sql" | "diagram">("data");
+  const [view, setView] = useState<"data" | "structure" | "sql" | "diagram" | "cards">("data");
   const [schema, setSchema] = useState<SchemaMap>({});
   const [schemaGraph, setSchemaGraph] = useState<SchemaGraph | null>(null);
   const [showAlterTable, setShowAlterTable] = useState(false);
@@ -109,6 +109,7 @@ export function useWorkspaceController(session: DatabaseSession) {
     reloadTable,
     clearTable,
   } = useTableData({
+    currentView: view,
     guardPending: () => pendingGuardRef.current(),
     resetTableUi: () => pendingResetRef.current(),
     resetTableDetails,

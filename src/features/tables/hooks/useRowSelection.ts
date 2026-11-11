@@ -10,7 +10,7 @@ import type { ColumnInfo, Row } from "@/types";
 type RowSelectionOptions = {
   displayRows: Row[];
   columns: ColumnInfo[];
-  view: "data" | "structure" | "sql" | "diagram";
+  view: "data" | "structure" | "sql" | "diagram" | "cards";
   setNotice: (notice: string | null) => void;
   onDeleteRows: (rows: Row[]) => string;
 };
