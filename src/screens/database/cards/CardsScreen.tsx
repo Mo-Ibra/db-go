@@ -82,6 +82,12 @@ export function CardsScreen() {
   const handlePreviewSelect = useCallback((_: unknown, index: number) => {
     setSelectedIndex(index);
   }, []);
+  const handleGridSelect = useCallback((_: unknown, index: number) => {
+    setSelectedIndex(index);
+  }, []);
+  const handleRetry = useCallback(() => {
+    void cardPage.reload();
+  }, [cardPage.reload]);
 
   if (!selected) {
     return (
@@ -269,8 +275,8 @@ export function CardsScreen() {
           rows={cardPage.rows}
           loading={cardPage.loading}
           error={cardPage.error}
-          onSelect={(_, index) => setSelectedIndex(index)}
-          onRetry={() => void cardPage.reload()}
+          onSelect={handleGridSelect}
+          onRetry={handleRetry}
         />
       )}
 

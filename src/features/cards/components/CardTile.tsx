@@ -2,7 +2,12 @@ import { memo } from "react";
 import { ArrowUpRight } from "lucide-react";
 import type { ColumnInfo, Row } from "@/types";
 import type { CardTemplate, FieldRef } from "@/features/cards/model";
-import { formatCardValue, fieldText, cardInitial } from "@/features/cards/renderers";
+import {
+  formatCardValue,
+  fieldText,
+  cardInitial,
+  truncateText,
+} from "@/features/cards/renderers";
 import { recordObject } from "@/features/cards/templates";
 import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/lib/cn";
@@ -18,9 +23,10 @@ type CardTileProps = {
 function valueOf(
   values: ReturnType<typeof recordObject>,
   field: FieldRef | undefined,
+  max = 200,
 ): string {
   if (!field) return "";
-  return formatCardValue(values[field.column], field);
+  return truncateText(formatCardValue(values[field.column], field), max);
 }
 
 function CardBadges({
@@ -33,7 +39,7 @@ function CardBadges({
   return (
     <>
       {fields.slice(0, 3).map((field) => {
-        const value = valueOf(values, field);
+        const value = valueOf(values, field, 60);
         if (!value || value === "—") return null;
         return <Badge key={field.column}>{value}</Badge>;
       })}
@@ -51,7 +57,7 @@ function CardMetadata({
   return (
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10.5px] text-muted-2">
       {fields.slice(0, 4).map((field) => {
-        const value = valueOf(values, field);
+        const value = valueOf(values, field, 60);
         if (!value || value === "—") return null;
         return (
           <span key={field.column} className="inline-flex items-center gap-1">
@@ -73,10 +79,10 @@ function CardTileInner({
 }: CardTileProps) {
   const values = recordObject(columns, row);
   const card = template.card;
-  const title = valueOf(values, card.title) || "Untitled";
-  const subtitle = valueOf(values, card.subtitle);
-  const description = valueOf(values, card.description);
-  const footnote = valueOf(values, card.footnote);
+  const title = valueOf(values, card.title, 140) || "Untitled";
+  const subtitle = valueOf(values, card.subtitle, 120);
+  const description = valueOf(values, card.description, 240);
+  const footnote = valueOf(values, card.footnote, 120);
 
   const minHeight =
     template.layout === "article" || template.layout === "profile"
@@ -88,7 +94,7 @@ function CardTileInner({
           : "min-h-[160px]";
 
   const shell = cn(
-    "group relative flex h-full cursor-pointer flex-col gap-3 overflow-hidden rounded-xl border border-line bg-panel/60 p-5 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-accent/35 hover:bg-panel-2 hover:shadow-[0_12px_30px_rgba(0,0,0,0.25)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+    "group relative flex h-full cursor-pointer flex-col gap-3 overflow-hidden rounded-xl border border-line bg-panel p-5 text-left transition-[border-color,background-color] duration-150 [contain:layout_paint] hover:border-accent/35 hover:bg-panel-2 hover:shadow-[0_12px_30px_rgba(0,0,0,0.25)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
     minHeight,
   );
 
@@ -181,7 +187,7 @@ function CardTileInner({
             </div>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 border-t border-line/70 pt-2">
               {card.fields.slice(0, 6).map((field) => {
-                const value = valueOf(values, field);
+                const value = valueOf(values, field, 80);
                 if (!value || value === "—") return null;
                 return (
                   <div key={field.column} className="min-w-0">

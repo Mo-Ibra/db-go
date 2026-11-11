@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { ColumnInfo, Row } from "@/types";
 import type { CardTemplate } from "@/features/cards/model";
 import { CardTile } from "./CardTile";
@@ -12,7 +13,7 @@ type CardGridProps = {
   onRetry: () => void;
 };
 
-export function CardGrid({
+function CardGridInner({
   template,
   columns,
   rows,
@@ -55,7 +56,7 @@ export function CardGrid({
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto p-4">
+    <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-4 [contain:layout_paint]">
       <div
         className="grid gap-3"
         style={{
@@ -76,3 +77,6 @@ export function CardGrid({
     </div>
   );
 }
+
+export const CardGrid = memo(CardGridInner);
+CardGrid.displayName = "CardGrid";

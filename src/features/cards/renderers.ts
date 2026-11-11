@@ -84,6 +84,15 @@ export function formatCardValue(cell: CellValue | undefined, field: FieldRef): s
   }
 }
 
+/**
+ * Card surfaces only show a short preview. Keeping the full text in the DOM
+ * forces the engine to lay out and paint huge strings on every scroll frame.
+ */
+export function truncateText(value: string, max = 200): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max).trimEnd()}…`;
+}
+
 export function fieldText(field: FieldRef): string {
   return field.label ?? fieldLabel(field.column);
 }

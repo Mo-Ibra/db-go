@@ -131,7 +131,7 @@ export function CardRecordPage({
       }
     >
       {!embedded ? (
-      <div className="sticky top-0 z-20 flex flex-none items-center justify-between gap-3 border-b border-line bg-panel/90 px-4 py-2 backdrop-blur-xl">
+      <div className="sticky top-0 z-20 flex flex-none items-center justify-between gap-3 border-b border-line bg-panel px-4 py-2">
         <div className="flex min-w-0 items-center gap-2">
           <Button variant="ghost" size="sm" icon={ArrowLeft} onClick={onBack}>
             Cards
