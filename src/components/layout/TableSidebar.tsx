@@ -1,21 +1,29 @@
+import { useMemo, useState } from "react";
 import { Plus, Search, Table2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Badge } from "@/components/ui/Badge";
 import { IconButton } from "@/components/ui/IconButton";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspacePendingSlice,
+  useWorkspaceSchemaSlice,
+  useWorkspaceSelector,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 
 export function TableSidebar() {
-  const {
-    tables,
-    filterText,
-    setFilterText,
-    db,
-    visibleTables,
-    selected,
-    selectTable,
-    requestDesigner,
-    hasPending,
-  } = useWorkspace();
+  const tables = useWorkspaceSelector((workspace) => workspace.tables);
+  const db = useWorkspaceSelector((workspace) => workspace.db);
+  const { selected, selectTable } = useWorkspaceTableSlice();
+  const { requestDesigner } = useWorkspaceSchemaSlice();
+  const { hasPending } = useWorkspacePendingSlice();
+  const [filterText, setFilterText] = useState("");
+  const visibleTables = useMemo(
+    () =>
+      tables.filter((table) =>
+        table.name.toLowerCase().includes(filterText.trim().toLowerCase()),
+      ),
+    [tables, filterText],
+  );
 
   return (
     <aside className="flex w-[268px] min-w-[220px] max-w-[360px] flex-col border-r border-line bg-panel/60">

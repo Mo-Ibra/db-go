@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -251,6 +251,7 @@ export function DiagramView({
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [flow, setFlow] = useState<ReactFlowInstance<TableNodeType, Edge> | null>(null);
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
   const onOpenTableRef = useRef(onOpenTable);
   onOpenTableRef.current = onOpenTable;
   const storageKey = `dbgo:diagram:${dbPath}`;
@@ -292,8 +293,8 @@ export function DiagramView({
   }, [graph, storageKey, flow, setNodes, setEdges]);
 
   useEffect(() => {
-    setNodes((current) => withSearch(current, search));
-  }, [search, setNodes]);
+    setNodes((current) => withSearch(current, deferredSearch));
+  }, [deferredSearch, setNodes]);
 
   if (!graph || graph.tables.length === 0) {
     return (
@@ -317,6 +318,7 @@ export function DiagramView({
       <ReactFlow
         nodes={nodes}
         edges={edges}
+        onlyRenderVisibleElements
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         nodeTypes={nodeTypes}

@@ -1,16 +1,16 @@
 import { Save, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspacePendingSlice,
+  useWorkspaceSessionSlice,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 
 export function StatusBanners() {
+  const { db, error, setError, notice, setNotice } = useWorkspaceSessionSlice();
+  const { selected } = useWorkspaceTableSlice();
   const {
-    db,
-    error,
-    setError,
-    notice,
-    setNotice,
-    selected,
     pendingInserts,
     pendingUpdates,
     pendingDeletes,
@@ -18,7 +18,7 @@ export function StatusBanners() {
     hasPending,
     discardChanges,
     saveChanges,
-  } = useWorkspace();
+  } = useWorkspacePendingSlice();
 
   const pendingCount = pendingInserts.length + pendingUpdates.length + pendingDeletes.length;
 

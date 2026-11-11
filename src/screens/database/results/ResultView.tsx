@@ -1,20 +1,29 @@
+import { useCallback } from "react";
+import type { Row } from "@/types";
 import { DataGrid } from "@/features/tables/components/DataGrid";
 import { RowDetail } from "@/features/tables/components/RowDetail";
 import { Copy, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspacePendingSlice,
+  useWorkspaceQuerySlice,
+  useWorkspaceSelector,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 
 export function ResultView() {
+  const view = useWorkspaceSelector((workspace) => workspace.view);
+  const setError = useWorkspaceSelector((workspace) => workspace.setError);
+  const detailColumns = useWorkspaceSelector(
+    (workspace) => workspace.detailColumns,
+  );
+  const openForeignKey = useWorkspaceSelector(
+    (workspace) => workspace.openForeignKey,
+  );
+  const { columns, foreignKeys, page, loading, sort, toggleSort } =
+    useWorkspaceTableSlice();
   const {
-    setError,
-    view,
-    columns,
-    foreignKeys,
-    page,
-    loading,
-    sort,
-    toggleSort,
     selectedRow,
     setSelectedRow,
     selectionKeys,
@@ -32,11 +41,36 @@ export function ResultView() {
     pasteIntoCell,
     editSelectedRow,
     deleteSelectedRow,
-    queryResult,
-    queryRunning,
-    detailColumns,
-    openForeignKey,
-  } = useWorkspace();
+  } = useWorkspacePendingSlice();
+  const { queryResult, queryRunning } = useWorkspaceQuerySlice();
+
+  const handleRowClick = useCallback(
+    (_row: Row, index: number) => {
+      const row = displayRows[index];
+      if (row) setSelectedRow({ row, index });
+    },
+    [displayRows, setSelectedRow],
+  );
+  const handleQueryRowClick = useCallback(
+    (row: Row, index: number) => setSelectedRow({ row, index }),
+    [setSelectedRow],
+  );
+  const handleCopy = useCallback(() => void copySelectedRows(), [copySelectedRows]);
+  const handleClipboardError = useCallback(
+    (message: string) => setError(message),
+    [setError],
+  );
+  const handleCloseDetail = useCallback(
+    () => setSelectedRow(null),
+    [setSelectedRow],
+  );
+  const handleNavigateForeignKey = useCallback(
+    (
+      foreignKey: Parameters<typeof openForeignKey>[0],
+      cell: Parameters<typeof openForeignKey>[1],
+    ) => void openForeignKey(foreignKey, cell),
+    [openForeignKey],
+  );
 
   return (
     (view === "data" || view === "sql") && (
@@ -92,9 +126,7 @@ export function ResultView() {
                     rows={displayRows}
                     sort={sort}
                     onSort={toggleSort}
-                    onRowClick={(_, index) =>
-                      setSelectedRow({ row: displayRows[index], index })
-                    }
+                    onRowClick={handleRowClick}
                     selectedIndex={selectedRow?.index ?? null}
                     dirtyRowIds={pendingRowIds}
                     selectionKeys={selectionKeys}
@@ -102,10 +134,10 @@ export function ResultView() {
                     someSelected={someSelected}
                     onToggleRow={toggleRowSelection}
                     onToggleAll={toggleAllSelection}
-                    onCopy={() => void copySelectedRows()}
+                    onCopy={handleCopy}
                     onPaste={pasteIntoCell}
-                    onClipboardError={(message) => setError(message)}
-                    onEditError={(message) => setError(message)}
+                    onClipboardError={handleClipboardError}
+                    onEditError={handleClipboardError}
                     canEditCell={canEditCell}
                     onCommitCell={handleCellCommit}
                   />
@@ -120,7 +152,7 @@ export function ResultView() {
             <DataGrid
               columns={queryResult.columns}
               rows={queryResult.rows}
-              onRowClick={(row, index) => setSelectedRow({ row, index })}
+              onRowClick={handleQueryRowClick}
               selectedIndex={selectedRow?.index ?? null}
             />
           ) : (
@@ -134,7 +166,7 @@ export function ResultView() {
             columns={detailColumns}
             row={selectedRow.row}
             index={selectedRow.index}
-            onClose={() => setSelectedRow(null)}
+            onClose={handleCloseDetail}
             pending={
               view === "data" &&
               (selectedRow.row.pendingKey !== undefined ||
@@ -157,9 +189,7 @@ export function ResultView() {
             }
             foreignKeys={view === "data" ? foreignKeys : undefined}
             onNavigateForeignKey={
-              view === "data"
-                ? (foreignKey, cell) => void openForeignKey(foreignKey, cell)
-                : undefined
+              view === "data" ? handleNavigateForeignKey : undefined
             }
           />
         )}

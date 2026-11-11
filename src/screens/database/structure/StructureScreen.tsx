@@ -1,10 +1,13 @@
 import { StructureView } from "@/features/schema/components/StructureView";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspaceSchemaSlice,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 import { ViewToolbar } from "@/screens/database/data/ViewToolbar";
 
 export function StructureScreen() {
+  const { selected } = useWorkspaceTableSlice();
   const {
-    selected,
     tableDetails,
     tableStats,
     detailsLoading,
@@ -13,7 +16,7 @@ export function StructureScreen() {
     handleCreateIndex,
     handleDropIndex,
     openReferencedTable,
-  } = useWorkspace();
+  } = useWorkspaceSchemaSlice();
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

@@ -68,7 +68,8 @@ export function CardGrid({
             template={template}
             columns={columns}
             row={row}
-            onClick={() => onSelect(row, index)}
+            index={index}
+            onSelect={onSelect}
           />
         ))}
       </div>

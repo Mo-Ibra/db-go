@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { ArrowUpRight } from "lucide-react";
 import type { ColumnInfo, Row } from "@/types";
 import type { CardTemplate, FieldRef } from "@/features/cards/model";
@@ -10,7 +11,8 @@ type CardTileProps = {
   template: CardTemplate;
   columns: ColumnInfo[];
   row: Row;
-  onClick: () => void;
+  index: number;
+  onSelect?: (row: Row, index: number) => void;
 };
 
 function valueOf(
@@ -62,7 +64,13 @@ function CardMetadata({
   );
 }
 
-export function CardTile({ template, columns, row, onClick }: CardTileProps) {
+function CardTileInner({
+  template,
+  columns,
+  row,
+  index,
+  onSelect,
+}: CardTileProps) {
   const values = recordObject(columns, row);
   const card = template.card;
   const title = valueOf(values, card.title) || "Untitled";
@@ -217,7 +225,7 @@ export function CardTile({ template, columns, row, onClick }: CardTileProps) {
   })();
 
   return (
-    <button type="button" className={shell} onClick={onClick}>
+    <button type="button" className={shell} onClick={() => onSelect?.(row, index)}>
       {template.layout === "article" || template.layout === "profile" ? (
         <span className="h-1 w-10 rounded-full bg-accent/70" />
       ) : null}
@@ -229,3 +237,6 @@ export function CardTile({ template, columns, row, onClick }: CardTileProps) {
     </button>
   );
 }
+
+export const CardTile = memo(CardTileInner);
+CardTile.displayName = "CardTile";

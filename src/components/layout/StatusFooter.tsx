@@ -1,18 +1,20 @@
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspaceQuerySlice,
+  useWorkspaceSchemaSlice,
+  useWorkspaceSelector,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 
 export function StatusFooter() {
-  const {
-    db,
-    view,
-    schemaGraph,
-    tableDetails,
-    selected,
-    queryResult,
-    page,
-    pagedMode,
-    rowStart,
-    rowEnd,
-  } = useWorkspace();
+  const db = useWorkspaceSelector((workspace) => workspace.db);
+  const view = useWorkspaceSelector((workspace) => workspace.view);
+  const schemaGraph = useWorkspaceSelector(
+    (workspace) => workspace.schemaGraph,
+  );
+  const { tableDetails } = useWorkspaceSchemaSlice();
+  const { selected, page, pagedMode, rowStart, rowEnd } =
+    useWorkspaceTableSlice();
+  const { queryResult } = useWorkspaceQuerySlice();
 
   return (
     <footer className="flex h-[26px] flex-none items-center justify-between gap-4 border-t border-line bg-panel px-3 font-mono text-[10.5px] text-muted-2">

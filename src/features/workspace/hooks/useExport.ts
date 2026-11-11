@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "@/lib/api";
+import { getSqlDraft } from "@/features/query/sqlDraft";
 import type { ExportFormat, FilterSpec, SortSpec } from "@/types";
 
 type View = "data" | "structure" | "sql" | "diagram" | "cards";
@@ -11,7 +12,6 @@ type ExportOptions = {
   guardPending: () => boolean;
   view: View;
   selected: string | null;
-  sqlText: string;
   exportFormat: ExportFormat;
   dataFilter: FilterSpec | null;
   sort: SortSpec | null;
@@ -25,7 +25,6 @@ export function useExport({
   guardPending,
   view,
   selected,
-  sqlText,
   exportFormat,
   dataFilter,
   sort,
@@ -38,6 +37,7 @@ export function useExport({
 
     const isData = view === "data";
     const isSql = view === "sql";
+    const sqlText = getSqlDraft();
     if (isData && !selected) return;
     if (isSql && !sqlText.trim()) return;
     if (!isData && !isSql) return;
@@ -76,7 +76,6 @@ export function useExport({
     guardPending,
     view,
     selected,
-    sqlText,
     exportFormat,
     dataFilter,
     sort,

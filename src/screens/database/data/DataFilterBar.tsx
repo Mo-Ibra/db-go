@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
 import { Select } from "@/components/ui/Select";
 import { FILTER_OPS, isNullOp } from "@/components/ui/constants";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import { useWorkspaceTableSlice } from "@/app/providers/WorkspaceContext";
 
 export function DataFilterBar() {
   const {
@@ -16,7 +16,7 @@ export function DataFilterBar() {
     setFilterDraft,
     applyFilter,
     clearFilter,
-  } = useWorkspace();
+  } = useWorkspaceTableSlice();
 
   return (
     <div className="flex h-10 flex-none items-center gap-2 border-b border-line bg-panel/40 px-3">

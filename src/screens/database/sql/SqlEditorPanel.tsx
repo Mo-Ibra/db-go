@@ -5,20 +5,25 @@ import { Download, ListTree, Play } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { QUERY_LIMITS } from "@/components/ui/constants";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import { useSqlDraft } from "@/features/query/sqlDraft";
+import {
+  useWorkspaceActionSlice,
+  useWorkspaceDialogSlice,
+  useWorkspaceQuerySlice,
+  useWorkspaceSelector,
+} from "@/app/providers/WorkspaceContext";
 
 const SqlEditor = lazy(() =>
   import("@/features/query/components/SqlEditor").then((module) => ({ default: module.SqlEditor })),
 );
 
 export function SqlEditorPanel() {
+  const view = useWorkspaceSelector((workspace) => workspace.view);
+  const schema = useWorkspaceSelector((workspace) => workspace.schema);
+  const { exportFormat, setExportFormat, exporting } =
+    useWorkspaceDialogSlice();
+  const sqlText = useSqlDraft();
   const {
-    view,
-    schema,
-    exportFormat,
-    setExportFormat,
-    exporting,
-    sqlText,
     queryResult,
     queryRunning,
     queryPlan,
@@ -30,8 +35,8 @@ export function SqlEditorPanel() {
     runQuery,
     explainQuery,
     changeSqlText,
-    exportCurrent,
-  } = useWorkspace();
+  } = useWorkspaceQuerySlice();
+  const { exportCurrent } = useWorkspaceActionSlice();
 
   return (
     <>

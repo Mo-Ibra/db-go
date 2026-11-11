@@ -9,28 +9,33 @@ import {
   Upload,
 } from "lucide-react";
 import logo from "@/assets/dbgo-logo.png";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspaceDialogSlice,
+  useWorkspacePendingSlice,
+  useWorkspaceQuerySlice,
+  useWorkspaceSelector,
+  useWorkspaceSessionSlice,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
 
 export function AppHeader() {
+  const busy = useWorkspaceSelector((workspace) => workspace.busy);
+  const view = useWorkspaceSelector((workspace) => workspace.view);
+  const refresh = useWorkspaceSelector((workspace) => workspace.refresh);
+  const { db, createNewDatabase, openDb } = useWorkspaceSessionSlice();
+  const { selected } = useWorkspaceTableSlice();
+  const { saving } = useWorkspacePendingSlice();
+  const { queryRunning } = useWorkspaceQuerySlice();
   const {
-    db,
-    busy,
-    selected,
-    view,
-    refresh,
     openMigrations,
     openBackups,
     requestImport,
     requestD1Export,
-    createNewDatabase,
-    openDb,
-    saving,
     restoringBackup,
     creatingBackup,
-    queryRunning,
-  } = useWorkspace();
+  } = useWorkspaceDialogSlice();
 
   const refreshLabel =
     view === "sql"

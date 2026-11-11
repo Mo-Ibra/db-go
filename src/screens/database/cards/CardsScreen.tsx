@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Table2 } from "lucide-react";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspaceSelector,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 import { useTableColumns } from "@/features/cards/hooks/useTableColumns";
 import { useCardTemplates } from "@/features/cards/hooks/useCardTemplates";
 import { useCardPage } from "@/features/cards/hooks/useCardPage";
@@ -14,7 +17,9 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import type { SortSpec } from "@/types";
 
 export function CardsScreen() {
-  const { db, selected, setView, loadTable } = useWorkspace();
+  const db = useWorkspaceSelector((workspace) => workspace.db);
+  const setView = useWorkspaceSelector((workspace) => workspace.setView);
+  const { selected, loadTable } = useWorkspaceTableSlice();
   const { columns, loading: columnsLoading, error: columnsError } = useTableColumns(selected);
   const {
     templates,
@@ -74,6 +79,9 @@ export function CardsScreen() {
   }, [cardPage.rows.length, selectedIndex]);
 
   const selectedRow = selectedIndex !== null ? cardPage.rows[selectedIndex] : null;
+  const handlePreviewSelect = useCallback((_: unknown, index: number) => {
+    setSelectedIndex(index);
+  }, []);
 
   if (!selected) {
     return (
@@ -244,8 +252,9 @@ export function CardsScreen() {
                         template={activeTemplate}
                         columns={columns}
                         row={row}
-                        onClick={() => setSelectedIndex(index)}
-                        />
+                        index={index}
+                        onSelect={handlePreviewSelect}
+                      />
                       ))}
                   </div>
                 )}

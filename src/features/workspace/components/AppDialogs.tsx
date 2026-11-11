@@ -6,25 +6,28 @@ import { ImportDialog } from "@/features/project/components/ImportDialog";
 import { D1ExportDialog } from "@/features/project/components/D1ExportDialog";
 import { TableDesigner } from "@/features/schema/components/TableDesigner";
 import { basename } from "@/lib/path";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspaceActionSlice,
+  useWorkspaceDialogSlice,
+  useWorkspacePendingSlice,
+  useWorkspaceSchemaSlice,
+  useWorkspaceSelector,
+  useWorkspaceShellSlice,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 
 export function AppDialogs() {
+  const db = useWorkspaceSelector((workspace) => workspace.db);
+  const tables = useWorkspaceSelector((workspace) => workspace.tables);
+  const schema = useWorkspaceSelector((workspace) => workspace.schema);
+  const { selected, columns } = useWorkspaceTableSlice();
+  const { rowEditor, setRowEditor, submitRowEditor } =
+    useWorkspacePendingSlice();
+  const { showDesigner, setShowDesigner, showAlterTable, setShowAlterTable } =
+    useWorkspaceShellSlice();
+  const { tableDetails, handleAlterApplied } = useWorkspaceSchemaSlice();
+  const { handleTableCreated } = useWorkspaceActionSlice();
   const {
-    db,
-    tables,
-    showDesigner,
-    setShowDesigner,
-    schema,
-    showAlterTable,
-    setShowAlterTable,
-    creatingBackup,
-    restoringBackup,
-    selected,
-    columns,
-    rowEditor,
-    setRowEditor,
-    submitRowEditor,
-    tableDetails,
     showMigrations,
     setShowMigrations,
     migrations,
@@ -47,9 +50,9 @@ export function AppDialogs() {
     handleImported,
     handleD1Exported,
     handleRestoreBackup,
-    handleAlterApplied,
-    handleTableCreated,
-  } = useWorkspace();
+    creatingBackup,
+    restoringBackup,
+  } = useWorkspaceDialogSlice();
 
   return (
     <>

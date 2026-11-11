@@ -1,6 +1,11 @@
 import { lazy, Suspense } from "react";
 import { Network } from "lucide-react";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspacePendingSlice,
+  useWorkspaceSchemaSlice,
+  useWorkspaceSelector,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 import { Badge } from "@/components/ui/Badge";
 
 const DiagramView = lazy(() =>
@@ -10,16 +15,14 @@ const DiagramView = lazy(() =>
 );
 
 export function DiagramScreen() {
-  const {
-    db,
-    schemaGraph,
-    selected,
-    guardPending,
-    setView,
-    loadTable,
-    requestDesigner,
-    requestAlterTable,
-  } = useWorkspace();
+  const db = useWorkspaceSelector((workspace) => workspace.db);
+  const schemaGraph = useWorkspaceSelector(
+    (workspace) => workspace.schemaGraph,
+  );
+  const setView = useWorkspaceSelector((workspace) => workspace.setView);
+  const { selected, loadTable } = useWorkspaceTableSlice();
+  const { guardPending } = useWorkspacePendingSlice();
+  const { requestDesigner, requestAlterTable } = useWorkspaceSchemaSlice();
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

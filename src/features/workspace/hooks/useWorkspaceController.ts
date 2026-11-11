@@ -1,11 +1,3 @@
-import { useEffect, useRef, useState } from "react";
-import { api } from "@/lib/api";
-import type {
-  ExportFormat,
-  SchemaGraph,
-  SchemaMap,
-  TableInfo,
-} from "@/types";
 import type { useDatabaseSession } from "@/features/connection/hooks/useDatabaseSession";
 import { usePendingEdits } from "@/features/tables/hooks/usePendingEdits";
 import { useTableData } from "@/features/tables/hooks/useTableData";
@@ -14,8 +6,9 @@ import { useQueryEditor } from "@/features/query/hooks/useQueryEditor";
 import { useTableDetails } from "@/features/schema/hooks/useTableDetails";
 import { useExport } from "@/features/workspace/hooks/useExport";
 import { useSchemaActions } from "@/features/schema/hooks/useSchemaActions";
-import { useExternalDataSync } from "@/features/workspace/hooks/useExternalDataSync";
 import { useOpenDatabaseShortcut } from "@/features/workspace/hooks/useOpenDatabaseShortcut";
+import { useWorkspaceState } from "@/features/workspace/hooks/useWorkspaceState";
+import { useWorkspaceSync } from "@/features/workspace/hooks/useWorkspaceSync";
 
 type DatabaseSession = ReturnType<typeof useDatabaseSession>;
 
@@ -36,23 +29,34 @@ export function useWorkspaceController(session: DatabaseSession) {
     openDb,
     createNewDatabase,
   } = session;
-  const [tables, setTables] = useState<TableInfo[]>(db?.tables ?? []);
-  const [filterText, setFilterText] = useState("");
-  const [showDesigner, setShowDesigner] = useState(showDesignerOnOpen);
-  const [view, setView] = useState<"data" | "structure" | "sql" | "diagram" | "cards">("data");
-  const [schema, setSchema] = useState<SchemaMap>({});
-  const [schemaGraph, setSchemaGraph] = useState<SchemaGraph | null>(null);
-  const [showAlterTable, setShowAlterTable] = useState(false);
-  const [creatingBackup, setCreatingBackup] = useState(false);
-  const [restoringBackup, setRestoringBackup] = useState<string | null>(null);
-  const [exportFormat, setExportFormat] = useState<ExportFormat>("csv");
-  const [exporting, setExporting] = useState(false);
-  const initialized = useRef(false);
-  const lastDataVersion = useRef<number | null>(null);
-  const externalChangePending = useRef(false);
-  const saveReloadRef = useRef<() => Promise<void>>(async () => {});
-  const pendingGuardRef = useRef<() => boolean>(() => false);
-  const pendingResetRef = useRef<() => void>(() => {});
+  const {
+    tables,
+    setTables,
+    showDesigner,
+    setShowDesigner,
+    view,
+    setView,
+    schema,
+    setSchema,
+    schemaGraph,
+    setSchemaGraph,
+    showAlterTable,
+    setShowAlterTable,
+    creatingBackup,
+    setCreatingBackup,
+    restoringBackup,
+    setRestoringBackup,
+    exportFormat,
+    setExportFormat,
+    exporting,
+    setExporting,
+    initialized,
+    lastDataVersion,
+    externalChangePending,
+    saveReloadRef,
+    pendingGuardRef,
+    pendingResetRef,
+  } = useWorkspaceState(db?.tables ?? [], showDesignerOnOpen);
 
 
   const {
@@ -163,8 +167,6 @@ export function useWorkspaceController(session: DatabaseSession) {
   pendingResetRef.current = resetTableUi;
 
   const {
-    sqlText,
-    setSqlText,
     queryResult,
     queryRunning,
     queryPlan,
@@ -178,23 +180,10 @@ export function useWorkspaceController(session: DatabaseSession) {
     changeSqlText,
   } = useQueryEditor({ setView, setSelectedRow, setError });
 
-  useEffect(() => {
-    saveReloadRef.current = async () => {
-      try {
-        lastDataVersion.current = await api.dataVersion();
-      } catch {
-        // The explicit reload below still refreshes the view.
-      }
-      externalChangePending.current = false;
-      if (!selected) return;
-      if (pagedMode) {
-        await loadOffsetPage(selected, pageIndex, sort, dataFilter);
-      } else {
-        await loadTable(selected, history[historyIndex]);
-      }
-      void api.countRows(selected).then(setCount).catch(() => {});
-    };
-  }, [
+  useWorkspaceSync({
+    db,
+    dbPath: db?.path ?? null,
+    view,
     selected,
     pagedMode,
     pageIndex,
@@ -202,25 +191,29 @@ export function useWorkspaceController(session: DatabaseSession) {
     dataFilter,
     history,
     historyIndex,
+    loading,
+    queryRunning,
+    saving,
+    restoringBackup,
+    hasPending,
     loadTable,
     loadOffsetPage,
-  ]);
-
-  useEffect(() => {
-    if (!db || initialized.current) return;
-    initialized.current = true;
-    void Promise.all([api.schemaMap(), api.schemaGraph()])
-      .then(([nextSchema, nextGraph]) => {
-        setSchema(nextSchema);
-        setSchemaGraph(nextGraph);
-      })
-      .catch(() => {
-        setSchema({});
-        setSchemaGraph(null);
-      });
-    const firstTable = db.tables[0]?.name;
-    if (firstTable) void loadTable(firstTable, null);
-  }, [db, loadTable]);
+    loadDetails,
+    setCount,
+    setNotice,
+    setTables,
+    setSchema,
+    setSchemaGraph,
+    setSelected,
+    setPage,
+    setColumns,
+    setTableDetails,
+    setTableStats,
+    initialized,
+    lastDataVersion,
+    externalChangePending,
+    saveReloadRef,
+  });
 
   const {
     handleTableCreated,
@@ -256,7 +249,6 @@ export function useWorkspaceController(session: DatabaseSession) {
     setTableDetails,
     setTableStats,
     setSelectedRow,
-    setSqlText,
     setError,
     setNotice,
     guardPending,
@@ -275,7 +267,6 @@ export function useWorkspaceController(session: DatabaseSession) {
     dataFilter,
     history,
     historyIndex,
-    sqlText,
     schemaGraph,
   });
 
@@ -320,45 +311,12 @@ export function useWorkspaceController(session: DatabaseSession) {
 
   useOpenDatabaseShortcut(openDb);
 
-  useExternalDataSync({
-    dbPath: db?.path ?? null,
-    view,
-    selected,
-    pagedMode,
-    pageIndex,
-    sort,
-    dataFilter,
-    history,
-    historyIndex,
-    loading,
-    queryRunning,
-    saving,
-    restoringBackup,
-    hasPending,
-    lastDataVersion,
-    externalChangePending,
-    setNotice,
-    setTables,
-    setSchema,
-    setSchemaGraph,
-    setSelected,
-    setPage,
-    setColumns,
-    setCount,
-    setTableDetails,
-    setTableStats,
-    loadDetails,
-    loadTable,
-    loadOffsetPage,
-  });
-
   const exportCurrent = useExport({
     exporting,
     setExporting,
     guardPending,
     view,
     selected,
-    sqlText,
     exportFormat,
     dataFilter,
     sort,
@@ -366,9 +324,6 @@ export function useWorkspaceController(session: DatabaseSession) {
     setNotice,
   });
 
-  const visibleTables = tables.filter((table) =>
-    table.name.toLowerCase().includes(filterText.trim().toLowerCase()),
-  );
   const detailColumns = view === "data" ? columns : (queryResult?.columns ?? []);
 
 
@@ -388,8 +343,6 @@ export function useWorkspaceController(session: DatabaseSession) {
     createNewDatabase,
     tables,
     setTables,
-    filterText,
-    setFilterText,
     showDesigner,
     setShowDesigner,
     view,
@@ -476,8 +429,6 @@ export function useWorkspaceController(session: DatabaseSession) {
     submitRowEditor,
     editSelectedRow,
     deleteSelectedRow,
-    sqlText,
-    setSqlText,
     queryResult,
     queryRunning,
     queryPlan,
@@ -522,7 +473,6 @@ export function useWorkspaceController(session: DatabaseSession) {
     requestD1Export,
     handleD1Exported,
     handleRestoreBackup,
-    visibleTables,
     busy,
     detailColumns,
     refreshAfterSchemaChange,

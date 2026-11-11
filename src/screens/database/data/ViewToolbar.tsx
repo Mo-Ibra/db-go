@@ -5,15 +5,23 @@ import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
 import { Select } from "@/components/ui/Select";
 import { PAGE_SIZES } from "@/components/ui/constants";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspaceActionSlice,
+  useWorkspaceDialogSlice,
+  useWorkspacePendingSlice,
+  useWorkspaceSchemaSlice,
+  useWorkspaceSelector,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 
 export function ViewToolbar() {
+  const view = useWorkspaceSelector((workspace) => workspace.view);
+  const schemaGraph = useWorkspaceSelector(
+    (workspace) => workspace.schemaGraph,
+  );
+  const { exportFormat, setExportFormat, exporting } =
+    useWorkspaceDialogSlice();
   const {
-    view,
-    schemaGraph,
-    exportFormat,
-    setExportFormat,
-    exporting,
     selected,
     columns,
     pageSize,
@@ -25,11 +33,10 @@ export function ViewToolbar() {
     nextPage,
     prevPage,
     changePageSize,
-    setRowEditor,
-    requestAlterTable,
-    tableDetails,
-    exportCurrent,
-  } = useWorkspace();
+  } = useWorkspaceTableSlice();
+  const { setRowEditor } = useWorkspacePendingSlice();
+  const { requestAlterTable, tableDetails } = useWorkspaceSchemaSlice();
+  const { exportCurrent } = useWorkspaceActionSlice();
 
   return (
     <div className="flex h-12 flex-none items-center justify-between gap-3 border-b border-line px-3.5">

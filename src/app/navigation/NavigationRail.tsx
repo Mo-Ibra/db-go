@@ -1,7 +1,7 @@
 import { Database, LayoutGrid, ListTree, Network, TerminalSquare } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import { useWorkspaceNavigationSlice } from "@/app/providers/WorkspaceContext";
 
 const screens: { id: "data" | "cards" | "structure" | "diagram" | "sql"; label: string; icon: LucideIcon }[] = [
   { id: "data", label: "Data", icon: Database },
@@ -12,7 +12,7 @@ const screens: { id: "data" | "cards" | "structure" | "diagram" | "sql"; label: 
 ];
 
 export function NavigationRail() {
-  const { view, switchView } = useWorkspace();
+  const { view, switchView } = useWorkspaceNavigationSlice();
 
   return (
     <nav

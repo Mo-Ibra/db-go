@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
@@ -12,6 +12,9 @@ import { readClipboardText } from "@/lib/clipboard";
 const COLUMN_WIDTH = 180;
 const ROW_HEIGHT = 30;
 const SELECTION_WIDTH = 34;
+const OVERSCAN_ROWS = 8;
+const OVERSCAN_COLUMNS = 3;
+const COLUMN_VIRTUALIZE_THRESHOLD = 16;
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -80,7 +83,7 @@ type DataGridProps = {
   ) => string | null;
 };
 
-export function DataGrid({
+function DataGridInner({
   columns,
   rows,
   sort,
@@ -107,12 +110,15 @@ export function DataGrid({
   const [editing, setEditing] = useState<CellPosition | null>(null);
   const [editValue, setEditValue] = useState("");
   const [editError, setEditError] = useState<string | null>(null);
+  const [scrollLeft, setScrollLeft] = useState(0);
+  const [viewportWidth, setViewportWidth] = useState(0);
+  const scrollFrame = useRef<number | null>(null);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => bodyRef.current,
     estimateSize: () => ROW_HEIGHT,
-    overscan: 12,
+    overscan: OVERSCAN_ROWS,
   });
 
   const hasSelectionColumn = Boolean(onToggleRow);
@@ -120,6 +126,42 @@ export function DataGrid({
     columns.length * COLUMN_WIDTH + (hasSelectionColumn ? SELECTION_WIDTH : 0),
     1,
   );
+
+  const virtualizeColumns = columns.length > COLUMN_VIRTUALIZE_THRESHOLD;
+
+  const columnRange = useMemo(() => {
+    if (!virtualizeColumns) return { start: 0, end: columns.length };
+    const visibleWidth = viewportWidth || 1200;
+    const start = Math.max(
+      0,
+      Math.floor(scrollLeft / COLUMN_WIDTH) - OVERSCAN_COLUMNS,
+    );
+    const end = Math.min(
+      columns.length,
+      Math.ceil((scrollLeft + visibleWidth) / COLUMN_WIDTH) + OVERSCAN_COLUMNS,
+    );
+    return { start, end };
+  }, [virtualizeColumns, columns.length, scrollLeft, viewportWidth]);
+
+  useEffect(() => {
+    const element = bodyRef.current;
+    if (!element) return;
+    setViewportWidth(element.clientWidth);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) setViewportWidth(entry.contentRect.width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (scrollFrame.current !== null) {
+        cancelAnimationFrame(scrollFrame.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     setEditing(null);
@@ -133,11 +175,34 @@ export function DataGrid({
     setEditError(null);
   }, [columns]);
 
-  const syncScroll = () => {
+  const syncScroll = useCallback(() => {
     if (headerRef.current && bodyRef.current) {
       headerRef.current.scrollLeft = bodyRef.current.scrollLeft;
     }
-  };
+    if (scrollFrame.current !== null) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = null;
+      if (bodyRef.current) setScrollLeft(bodyRef.current.scrollLeft);
+    });
+  }, []);
+
+  const ensureColumnVisible = useCallback(
+    (columnIndex: number) => {
+      if (!virtualizeColumns) return;
+      const element = bodyRef.current;
+      if (!element) return;
+      const offset =
+        (hasSelectionColumn ? SELECTION_WIDTH : 0) + columnIndex * COLUMN_WIDTH;
+      const viewStart = element.scrollLeft;
+      const viewEnd = viewStart + element.clientWidth;
+      if (offset < viewStart) {
+        element.scrollLeft = offset;
+      } else if (offset + COLUMN_WIDTH > viewEnd) {
+        element.scrollLeft = offset + COLUMN_WIDTH - element.clientWidth;
+      }
+    },
+    [hasSelectionColumn, virtualizeColumns],
+  );
 
   const startEdit = (rowIndex: number, columnIndex: number) => {
     if (!onCommitCell) return;
@@ -146,6 +211,7 @@ export function DataGrid({
     if (!row || !column) return;
     if (canEditCell && !canEditCell(row, column)) return;
     setActiveCell({ rowIndex, columnIndex });
+    ensureColumnVisible(columnIndex);
     setEditing({ rowIndex, columnIndex });
     setEditValue(cellText(row.cells[columnIndex]));
     setEditError(null);
@@ -225,13 +291,15 @@ export function DataGrid({
   const moveActive = (rowDelta: number, columnDelta: number) => {
     if (rows.length === 0 || columns.length === 0) return;
     const current = activeCell ?? { rowIndex: 0, columnIndex: 0 };
+    const columnIndex = Math.min(
+      Math.max(current.columnIndex + columnDelta, 0),
+      columns.length - 1,
+    );
     setActiveCell({
       rowIndex: Math.min(Math.max(current.rowIndex + rowDelta, 0), rows.length - 1),
-      columnIndex: Math.min(
-        Math.max(current.columnIndex + columnDelta, 0),
-        columns.length - 1,
-      ),
+      columnIndex,
     });
+    ensureColumnVisible(columnIndex);
   };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -323,7 +391,14 @@ export function DataGrid({
               />
             </div>
           )}
-          {columns.map((column, index) => {
+          {columnRange.start > 0 && (
+            <div
+              className="flex-none"
+              style={{ width: columnRange.start * COLUMN_WIDTH }}
+            />
+          )}
+          {columns.slice(columnRange.start, columnRange.end).map((column, offset) => {
+            const index = columnRange.start + offset;
             const active = sort?.column === column.name;
             const content = (
               <>
@@ -367,6 +442,12 @@ export function DataGrid({
               </div>
             );
           })}
+          {columnRange.end < columns.length && (
+            <div
+              className="flex-none"
+              style={{ width: (columns.length - columnRange.end) * COLUMN_WIDTH }}
+            />
+          )}
         </div>
       </div>
 
@@ -439,7 +520,16 @@ export function DataGrid({
                       />
                     </div>
                   )}
-                  {row.cells.map((cell, index) => {
+                  {columnRange.start > 0 && (
+                    <div
+                      className="flex-none"
+                      style={{ width: columnRange.start * COLUMN_WIDTH }}
+                    />
+                  )}
+                  {row.cells
+                    .slice(columnRange.start, columnRange.end)
+                    .map((cell, offset) => {
+                    const index = columnRange.start + offset;
                     const active =
                       activeCell?.rowIndex === item.index &&
                       activeCell.columnIndex === index;
@@ -493,6 +583,12 @@ export function DataGrid({
                       </div>
                     );
                   })}
+                  {columnRange.end < columns.length && (
+                    <div
+                      className="flex-none"
+                      style={{ width: (columns.length - columnRange.end) * COLUMN_WIDTH }}
+                    />
+                  )}
                 </div>
               );
             })}
@@ -502,3 +598,6 @@ export function DataGrid({
     </div>
   );
 }
+
+export const DataGrid = memo(DataGridInner);
+DataGrid.displayName = "DataGrid";

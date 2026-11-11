@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { api } from "@/lib/api";
 import type { QueryPlan, QueryResult } from "@/types";
+import { setSqlDraft } from "@/features/query/sqlDraft";
 
 const QUERY_HISTORY_KEY = "dbgo:query-history";
 
@@ -15,7 +16,6 @@ export function useQueryEditor({
   setSelectedRow,
   setError,
 }: QueryEditorOptions) {
-  const [sqlText, setSqlText] = useState("");
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [queryRunning, setQueryRunning] = useState(false);
   const [queryPlan, setQueryPlan] = useState<QueryPlan | null>(null);
@@ -39,7 +39,7 @@ export function useQueryEditor({
       const statement = text.trim();
       if (!statement) return;
 
-      setSqlText(statement);
+      setSqlDraft(statement);
       setView("sql");
       setSelectedRow(null);
       setQueryPlan(null);
@@ -73,7 +73,7 @@ export function useQueryEditor({
       const statement = text.trim();
       if (!statement) return;
 
-      setSqlText(statement);
+      setSqlDraft(statement);
       setView("sql");
       setSelectedRow(null);
       setExplainRunning(true);
@@ -91,12 +91,12 @@ export function useQueryEditor({
   );
 
   const changeSqlText = useCallback((value: string) => {
-    setSqlText(value);
+    setSqlDraft(value);
     setQueryPlan(null);
   }, []);
 
   const resetQueryEditor = useCallback(() => {
-    setSqlText("");
+    setSqlDraft("");
     setQueryResult(null);
     setQueryRunning(false);
     setQueryPlan(null);
@@ -104,8 +104,6 @@ export function useQueryEditor({
   }, []);
 
   return {
-    sqlText,
-    setSqlText,
     queryResult,
     setQueryResult,
     queryRunning,

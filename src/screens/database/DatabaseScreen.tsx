@@ -1,5 +1,9 @@
 import { Table2 } from "lucide-react";
-import { useWorkspace } from "@/app/providers/WorkspaceContext";
+import {
+  useWorkspaceSchemaSlice,
+  useWorkspaceSelector,
+  useWorkspaceTableSlice,
+} from "@/app/providers/WorkspaceContext";
 import { StatusBanners } from "@/components/feedback/StatusBanners";
 import { StatusFooter } from "@/components/layout/StatusFooter";
 import { Button } from "@/components/ui/Button";
@@ -11,7 +15,10 @@ import { SqlScreen } from "@/screens/database/sql/SqlScreen";
 import { StructureScreen } from "@/screens/database/structure/StructureScreen";
 
 export function DatabaseScreen() {
-  const { tables, selected, view, requestDesigner } = useWorkspace();
+  const tables = useWorkspaceSelector((workspace) => workspace.tables);
+  const view = useWorkspaceSelector((workspace) => workspace.view);
+  const { selected } = useWorkspaceTableSlice();
+  const { requestDesigner } = useWorkspaceSchemaSlice();
 
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
