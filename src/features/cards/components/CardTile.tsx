@@ -1,3 +1,4 @@
+import { ArrowUpRight } from "lucide-react";
 import type { ColumnInfo, Row } from "@/types";
 import type { CardTemplate, FieldRef } from "@/features/cards/model";
 import { formatCardValue, fieldText, cardInitial } from "@/features/cards/renderers";
@@ -69,8 +70,18 @@ export function CardTile({ template, columns, row, onClick }: CardTileProps) {
   const description = valueOf(values, card.description);
   const footnote = valueOf(values, card.footnote);
 
+  const minHeight =
+    template.layout === "article" || template.layout === "profile"
+      ? "min-h-[220px]"
+      : template.layout === "keyValue"
+        ? "min-h-[190px]"
+        : template.layout === "compact"
+          ? "min-h-[112px]"
+          : "min-h-[160px]";
+
   const shell = cn(
-    "group flex h-full cursor-pointer flex-col gap-2.5 rounded-xl border border-line bg-panel/70 p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-accent/35 hover:bg-panel-2 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+    "group relative flex h-full cursor-pointer flex-col gap-3 overflow-hidden rounded-xl border border-line bg-panel/60 p-5 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-accent/35 hover:bg-panel-2 hover:shadow-[0_12px_30px_rgba(0,0,0,0.25)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+    minHeight,
   );
 
   const content = (() => {
@@ -207,6 +218,13 @@ export function CardTile({ template, columns, row, onClick }: CardTileProps) {
 
   return (
     <button type="button" className={shell} onClick={onClick}>
+      {template.layout === "article" || template.layout === "profile" ? (
+        <span className="h-1 w-10 rounded-full bg-accent/70" />
+      ) : null}
+      <ArrowUpRight
+        size={14}
+        className="absolute right-3.5 top-3.5 text-muted-2 opacity-0 transition-opacity group-hover:opacity-100"
+      />
       {content}
     </button>
   );

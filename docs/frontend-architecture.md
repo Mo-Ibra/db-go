@@ -32,7 +32,7 @@ and dialogs do not need a large manual reset routine.
 - **Data** — table sidebar, toolbar, filter bar, grid, row detail, pending changes.
 - **Structure** — table sidebar, columns, indexes, foreign keys, DDL.
 - **Diagram** — full-width schema diagram.
-- **Cards** — schema-driven card explorer with five layouts, pagination, search, sort, and a read-only detail drawer.
+- **Cards** — schema-driven card explorer with five layouts, design mode, pagination, search, sort, and a full-page read-only record view.
 - **SQL** — editor, query history, query plan, results, export.
 
 Import, backups, migrations, D1 export, table design, and row editing remain

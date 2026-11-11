@@ -1,7 +1,6 @@
 import type { ColumnInfo, Row } from "@/types";
 import type { CardTemplate } from "@/features/cards/model";
 import { CardTile } from "./CardTile";
-import { cn } from "@/lib/cn";
 
 type CardGridProps = {
   template: CardTemplate;
@@ -12,13 +11,6 @@ type CardGridProps = {
   onSelect: (row: Row, index: number) => void;
   onRetry: () => void;
 };
-
-const columnClasses = {
-  1: "grid-cols-1",
-  2: "grid-cols-1 md:grid-cols-2",
-  3: "grid-cols-1 md:grid-cols-2 xl:grid-cols-3",
-  4: "grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4",
-} as const;
 
 export function CardGrid({
   template,
@@ -64,7 +56,12 @@ export function CardGrid({
 
   return (
     <div className="min-h-0 flex-1 overflow-auto p-4">
-      <div className={cn("grid gap-3", columnClasses[template.columns])}>
+      <div
+        className="grid gap-3"
+        style={{
+          gridTemplateColumns: `repeat(${template.columns}, minmax(0, 1fr))`,
+        }}
+      >
         {rows.map((row, index) => (
           <CardTile
             key={row.rowid ?? `row-${index}`}

@@ -6,8 +6,9 @@ import { useCardTemplates } from "@/features/cards/hooks/useCardTemplates";
 import { useCardPage } from "@/features/cards/hooks/useCardPage";
 import { CardToolbar } from "@/features/cards/components/CardToolbar";
 import { CardGrid } from "@/features/cards/components/CardGrid";
-import { CardDetailDrawer } from "@/features/cards/components/CardDetailDrawer";
+import { CardRecordPage } from "@/features/cards/components/CardRecordPage";
 import { CardDesigner } from "@/features/cards/components/CardDesigner";
+import type { DesignerTab } from "@/features/cards/components/CardDesigner";
 import { CardTile } from "@/features/cards/components/CardTile";
 import { EmptyState } from "@/components/ui/EmptyState";
 import type { SortSpec } from "@/types";
@@ -39,6 +40,7 @@ export function CardsScreen() {
   const [sort, setSort] = useState<SortSpec | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [designing, setDesigning] = useState(false);
+  const [designerTab, setDesignerTab] = useState<DesignerTab>("card");
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -111,6 +113,32 @@ export function CardsScreen() {
     );
   }
 
+  if (!designing && selectedRow && selectedIndex !== null) {
+    return (
+      <CardRecordPage
+        template={activeTemplate}
+        columns={columns}
+        row={selectedRow}
+        index={selectedIndex}
+        total={cardPage.rows.length}
+        onBack={() => setSelectedIndex(null)}
+        onPrevious={() => setSelectedIndex((index) => Math.max(0, (index ?? 0) - 1))}
+        onNext={() =>
+          setSelectedIndex((index) =>
+            Math.min(cardPage.rows.length - 1, (index ?? 0) + 1),
+          )
+        }
+        canPrevious={selectedIndex > 0}
+        canNext={selectedIndex < cardPage.rows.length - 1}
+        onOpenData={() => {
+          setSelectedIndex(null);
+          setView("data");
+          void loadTable(selected, null);
+        }}
+      />
+    );
+  }
+
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
       <CardToolbar
@@ -151,29 +179,76 @@ export function CardsScreen() {
             onCreate={() => createTemplate(activeTemplate.layout)}
             onDuplicate={() => duplicateTemplate(activeTemplate.id)}
             onDelete={() => deleteTemplate(activeTemplate.id)}
+            onPreviewRecord={() => {
+              if (cardPage.rows.length > 0) {
+                setDesigning(false);
+                setSelectedIndex(0);
+              }
+            }}
+            canPreviewRecord={cardPage.rows.length > 0}
+            tab={designerTab}
+            onTabChange={setDesignerTab}
           />
-          <div className="min-h-0 flex-1 overflow-auto bg-ink p-6">
-            <div className="mb-4">
-              <h2 className="text-[13px] font-semibold tracking-tight">Live preview</h2>
+          <div className="flex min-h-0 flex-1 flex-col bg-ink">
+            <div className="flex-none border-b border-line px-6 py-4">
+              <h2 className="text-[13px] font-semibold tracking-tight">
+                {designerTab === "details" ? "Detail page preview" : "Live card preview"}
+              </h2>
               <p className="mt-0.5 text-[11.5px] text-muted">
-                Changes are saved automatically for this table.
+                {designerTab === "details"
+                  ? "This is exactly how the record page appears when a card is opened."
+                  : "Changes are saved automatically for this table."}
               </p>
             </div>
-            {cardPage.rows.length === 0 ? (
-              <div className="grid h-[240px] place-items-center rounded-xl border border-dashed border-line text-xs text-muted">
-                No records to preview.
-              </div>
-            ) : (
-              <div className="grid max-w-[1200px] grid-cols-1 gap-3 xl:grid-cols-3">
-                {cardPage.rows.slice(0, 3).map((row, index) => (
-                  <CardTile
-                    key={row.rowid ?? `preview-${index}`}
+            {designerTab === "details" ? (
+              cardPage.rows[0] ? (
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <CardRecordPage
                     template={activeTemplate}
                     columns={columns}
-                    row={row}
-                    onClick={() => setSelectedIndex(index)}
+                    row={cardPage.rows[0]}
+                    index={0}
+                    total={cardPage.rows.length}
+                    onBack={() => {}}
+                    onPrevious={() => {}}
+                    onNext={() => {}}
+                    canPrevious={false}
+                    canNext={false}
+                    onOpenData={() => {}}
+                    embedded
                   />
-                ))}
+                </div>
+              ) : (
+                <div className="grid flex-1 place-items-center text-xs text-muted">
+                  No records to preview.
+                </div>
+              )
+            ) : (
+              <div className="min-h-0 flex-1 overflow-auto p-6">
+                {cardPage.rows.length === 0 ? (
+                  <div className="grid h-[240px] place-items-center rounded-xl border border-dashed border-line text-xs text-muted">
+                    No records to preview.
+                  </div>
+                ) : (
+                  <div
+                    className="grid max-w-[1200px] gap-3"
+                    style={{
+                      gridTemplateColumns: `repeat(${activeTemplate.columns}, minmax(180px, 1fr))`,
+                    }}
+                  >
+                    {cardPage.rows
+                      .slice(0, Math.max(3, activeTemplate.columns * 2))
+                      .map((row, index) => (
+                      <CardTile
+                        key={row.rowid ?? `preview-${index}`}
+                        template={activeTemplate}
+                        columns={columns}
+                        row={row}
+                        onClick={() => setSelectedIndex(index)}
+                        />
+                      ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -190,28 +265,6 @@ export function CardsScreen() {
         />
       )}
 
-      {!designing && selectedRow && selectedIndex !== null ? (
-        <CardDetailDrawer
-          template={activeTemplate}
-          columns={columns}
-          row={selectedRow}
-          index={selectedIndex}
-          onClose={() => setSelectedIndex(null)}
-          onPrevious={() => setSelectedIndex((index) => Math.max(0, (index ?? 0) - 1))}
-          onNext={() =>
-            setSelectedIndex((index) =>
-              Math.min(cardPage.rows.length - 1, (index ?? 0) + 1),
-            )
-          }
-          canPrevious={selectedIndex > 0}
-          canNext={selectedIndex < cardPage.rows.length - 1}
-          onOpenData={() => {
-            setSelectedIndex(null);
-            setView("data");
-            void loadTable(selected, null);
-          }}
-        />
-      ) : null}
     </main>
   );
 }
