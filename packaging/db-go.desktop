@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=DBGo
+GenericName=SQL Workbench
+Comment=A fast, local-first SQL workbench
+Exec=db-go %f
+Icon=db-go
+Terminal=false
+Categories=Development;Database;
+Keywords=sql;sqlite;database;query;table;workbench;db;
+MimeType=application/x-sqlite3;application/vnd.sqlite3;
+StartupWMClass=db-go
+StartupNotify=true

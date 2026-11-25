@@ -32,6 +32,40 @@ fn lists_tables() {
 }
 
 #[test]
+fn hides_virtual_table_shadow_tables() {
+    let db = memory_db();
+    db.conn
+        .execute_batch(
+            "CREATE VIRTUAL TABLE companies_fts USING fts5(
+                 name, content = 'companies', content_rowid = 'id'
+             );",
+        )
+        .unwrap();
+
+    let names: Vec<String> = db.tables().unwrap().into_iter().map(|t| t.name).collect();
+    assert!(names.contains(&"companies".to_string()));
+    assert!(names.contains(&"companies_fts".to_string()));
+    assert!(
+        !names.iter().any(|name| name.starts_with("companies_fts_")),
+        "shadow tables leaked into the list: {names:?}"
+    );
+}
+
+#[test]
+fn page_rejects_without_rowid_tables() {
+    let db = memory_db();
+    db.conn
+        .execute_batch("CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID;")
+        .unwrap();
+
+    let error = db.page("kv", None, Direction::Next, 10).unwrap_err();
+    match error {
+        DbError::WithoutRowid(table) => assert_eq!(table, "kv"),
+        other => panic!("expected WithoutRowid, got {other:?}"),
+    }
+}
+
+#[test]
 fn pages_with_keyset() {
     let db = memory_db();
     let first = db.page("companies", None, Direction::Next, 2).unwrap();

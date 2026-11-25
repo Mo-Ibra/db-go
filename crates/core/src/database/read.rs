@@ -4,6 +4,11 @@ use crate::*;
 
 impl Database {
     /// List user tables in the database.
+    ///
+    /// Virtual-table shadow tables (FTS5's `*_data`, `*_idx`, `*_docsize`,
+    /// `*_config`, ...) are internal implementation details. They are not
+    /// browsable — several are `WITHOUT ROWID`, so rowid pagination cannot
+    /// address them — and exposing them only invites errors.
     pub fn tables(&self) -> Result<Vec<TableInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT name, type
@@ -11,6 +16,9 @@ impl Database {
              WHERE type = 'table'
                AND name NOT LIKE 'sqlite_%'
                AND substr(name, 1, 6) <> '_dbgo_'
+               AND name NOT IN (
+                   SELECT name FROM pragma_table_list WHERE type = 'shadow'
+               )
              ORDER BY name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -112,6 +120,22 @@ impl Database {
         })
     }
 
+    /// True when the table has an implicit rowid that keyset pagination can use.
+    ///
+    /// `PRAGMA table_list` reports `wr = 1` for `WITHOUT ROWID` tables. Virtual
+    /// tables report 0 and do expose a rowid, so they remain browsable.
+    pub(crate) fn has_rowid(&self, table: &str) -> Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT wr FROM pragma_table_list WHERE schema = 'main' AND name = ?1")?;
+        let mut rows = stmt.query([table])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get::<_, i64>(0)? == 0),
+            // Not in table_list (a view, or an attached schema): let SQLite decide.
+            None => Ok(true),
+        }
+    }
+
     /// Return the primary-key column name for a table, if it has one.
     pub(crate) fn primary_key_column(&self, table: &str) -> Result<Option<String>> {
         let columns = self.columns(table)?;
@@ -150,6 +174,9 @@ impl Database {
         limit: u32,
     ) -> Result<Page> {
         self.ensure_table(table)?;
+        if !self.has_rowid(table)? {
+            return Err(DbError::WithoutRowid(table.to_string()));
+        }
         let columns = self.columns(table)?;
         let limit = limit.clamp(1, 5_000) as i64;
         let quoted = quote_ident(table);
@@ -235,6 +262,9 @@ impl Database {
         limit: u32,
     ) -> Result<Page> {
         self.ensure_table(table)?;
+        if !self.has_rowid(table)? {
+            return Err(DbError::WithoutRowid(table.to_string()));
+        }
         let columns = self.columns(table)?;
         let quoted = quote_ident(table);
 

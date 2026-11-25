@@ -16,3 +16,9 @@ rusqlite = { version = "0.41", features = ["bundled", "column_decltype", "backup
 clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
 csv = "1"
+
+# Release binaries: keep them small and fast. Mirrors the recut profile.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

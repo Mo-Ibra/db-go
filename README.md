@@ -76,6 +76,33 @@ Build a release bundle:
 pnpm tauri:build
 ```
 
+### Build the standalone binary
+
+`pnpm tauri:build --no-bundle` works, but if you call `cargo build` yourself the
+GUI must get the `custom-protocol` feature, which embeds the frontend. Without
+it the window asks for `http://localhost:1420` and dies with
+`Could not connect to localhost` unless the Vite dev server happens to be
+running. Use the helper script:
+
+```bash
+./build.sh           # target/release/db-go
+./build.sh --debug   # target/debug/db-go
+```
+
+### Install on Linux (app menu, dock, icon)
+
+```bash
+./build.sh
+./install.sh
+```
+
+This installs the binary to `~/.local/lib/db-go/db-go` (symlinked as
+`~/.local/bin/db-go`), copies the icons into the hicolor theme, and adds
+`~/.local/share/applications/db-go.desktop` so DBGo appears in the application
+menu with its logo and groups correctly in the dock (`StartupWMClass=db-go`).
+It also installs the `dbgo` CLI when it has been built. Use `PREFIX=/usr/local`
+for a system-wide install, or `./install.sh --uninstall` to remove it.
+
 ## CLI
 
 Install the `dbgo` command:

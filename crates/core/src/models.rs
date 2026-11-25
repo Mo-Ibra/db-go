@@ -11,6 +11,8 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error("Table not found: {0}")]
     TableNotFound(String),
+    #[error("{0} has no rowid (WITHOUT ROWID table); query it instead of browsing it")]
+    WithoutRowid(String),
     #[error("only read-only queries are allowed")]
     ReadOnly,
     #[error("query returned no columns")]
